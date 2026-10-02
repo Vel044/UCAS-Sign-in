@@ -4,6 +4,14 @@
 
 面向国科大轻新课堂 / iClass 的 Android 客户端：当天课程查询、一键签到、二维码时间轴同步、跨安卓桌面小部件（含小米负一屏）。
 
+## iOS 移植（本 fork）
+
+新增原生 SwiftUI + WidgetKit 工程，支持 iOS / iPadOS 17+。
+登录、课表、手动签到、同步二维码、前台自动签到、通知提醒和桌面小组件已实现。
+后台刷新由 iOS 调度；后台 / 锁屏准时自动签到不保证。讲座页采用学校网页登录。
+构建、真机签名、接口配置及已知限制见 [`ios-app/README.md`](./ios-app/README.md)。
+分支：[ios-port](https://github.com/Vel044/UCAS-Sign-in/tree/ios-port)。
+
 > [!CAUTION]
 > **本项目仅供学习交流使用，请勿用于任何商业用途或非法用途。**
 
