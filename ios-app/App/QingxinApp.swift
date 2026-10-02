@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 import BackgroundTasks
+import QingxinCore
 
 @main struct QingxinApp: App {
     @StateObject private var state = AppState()
@@ -16,7 +17,12 @@ import BackgroundTasks
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background { Self.scheduleRefresh() }
-                    if phase == .active, state.loggedIn { Task { await state.refresh() } }
+                    if phase == .active, state.loggedIn {
+                        Task {
+                            if SchoolDate.key(state.selectedDate) == SchoolDate.key(Date()) { await state.refresh() }
+                            else { await state.backgroundRefresh() }
+                        }
+                    }
                 }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }

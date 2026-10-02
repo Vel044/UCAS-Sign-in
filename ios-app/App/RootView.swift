@@ -40,13 +40,13 @@ struct TodayView: View {
                         Text("\(state.todayCourses.count) 节").font(.subheadline).foregroundStyle(.secondary)
                     }
                     if state.todayCourses.isEmpty {
-                        ContentUnavailableView("今天暂无课程", systemImage: "cup.and.saucer", description: Text(state.status))
+                        ContentUnavailableView("今天暂无课程", systemImage: "cup.and.saucer", description: Text(state.todayStatus))
                     }
                     ForEach(state.todayCourses) { course in
                         CourseCard(course: course, qrAction: { qrCourse = course })
                     }
-                    Text(state.status).font(.caption).foregroundStyle(.secondary)
-                    if let updated = state.lastUpdated {
+                    Text(state.todayStatus).font(.caption).foregroundStyle(.secondary)
+                    if let updated = state.todayUpdated {
                         Text("更新于 \(updated.formatted(date: .omitted, time: .shortened))").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -172,8 +172,10 @@ struct ScheduleView: View {
             VStack(spacing: 16) {
                 HStack {
                     Button { moveDay(-1) } label: { Image(systemName: "chevron.left").padding(10) }
+                        .accessibilityLabel("上一天")
                     DatePicker("日期", selection: $state.selectedDate, displayedComponents: .date).labelsHidden().environment(\.timeZone, SchoolDate.zone)
                     Button { moveDay(1) } label: { Image(systemName: "chevron.right").padding(10) }
+                        .accessibilityLabel("下一天")
                 }
                 Text(state.status).font(.caption).foregroundStyle(.secondary)
                 if !state.loggedIn { ContentUnavailableView("请先登录", systemImage: "person.crop.circle") }
@@ -199,11 +201,13 @@ struct ScheduleView: View {
 struct ManualView: View {
     @EnvironmentObject private var state: AppState
     @State private var input = ""
+    @FocusState private var inputFocused: Bool
     var body: some View {
         Form {
             Section {
-                TextField("7 位编号 / 32 位 UUID", text: $input, axis: .vertical)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("7 位编号 / 32 位 UUID", text: $input)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().focused($inputFocused)
+                    .submitLabel(.done).onSubmit { inputFocused = false }
                 if let code = SignCode(input) { Label(code.label, systemImage: "checkmark.circle").foregroundStyle(Color.qingxin) }
                 else if !input.isEmpty { Text("编号格式不正确").foregroundStyle(.orange) }
             } header: { Text("现场课程编号") } footer: { Text("输入现场读取的编号。支持带连字符的 UUID；提交时使用学校服务器时间。") }
@@ -216,6 +220,11 @@ struct ManualView: View {
             }
             if !state.loggedIn || state.demo { Section { Text(state.demo ? "演示模式不会提交签到。" : "请先在今日页面登录。") } }
         }.navigationTitle("手动打卡")
+            .toolbar {
+                if inputFocused {
+                    ToolbarItem(placement: .topBarTrailing) { Button("完成") { inputFocused = false } }
+                }
+            }
     }
 }
 

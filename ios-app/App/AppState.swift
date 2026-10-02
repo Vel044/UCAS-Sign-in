@@ -8,6 +8,9 @@ import QingxinCore
     @Published var configuration: EndpointConfiguration
     @Published private(set) var session: SchoolSession?
     @Published private(set) var courses: [Course] = []
+    @Published private(set) var todayList: [Course] = []
+    @Published private(set) var todayStatus = "登录后查看今日课程"
+    @Published private(set) var todayUpdated: Date?
     @Published var selectedDate = Date()
     @Published private(set) var busy = false
     @Published private(set) var signing = false
@@ -32,6 +35,7 @@ import QingxinCore
         // iOS may keep Keychain items after uninstall. A fresh install starts signed out.
         if !UserDefaults.standard.bool(forKey: "hasLaunched") {
             SecureStore.remove("login")
+            SnapshotStore.clear()
             UserDefaults.standard.set(true, forKey: "hasLaunched")
         }
         let bundled: EndpointConfiguration?
@@ -46,7 +50,7 @@ import QingxinCore
     }
     var loggedIn: Bool { session != nil || demo }
     var api: QingxinAPI { QingxinAPI(configuration: configuration) }
-    var todayCourses: [Course] { courses.filter { $0.day == SchoolDate.key(Date()) } }
+    var todayCourses: [Course] { todayList.filter { $0.day == SchoolDate.key(Date()) } }
     var currentCourse: Course? {
         let now = Date()
         return todayCourses.first { $0.isInWindow(at: now) } ?? todayCourses.first { ($0.begin ?? .distantPast) > now }
@@ -76,15 +80,17 @@ import QingxinCore
         } catch { self.error = error.localizedDescription }
     }
     func login(identity: String, password: String, remember: Bool) async {
-        guard !busy else { return }; busy = true; error = nil
-        defer { busy = false }
+        guard !busy else { return }
         let token = generation
+        busy = true; error = nil
+        defer { if token == generation { busy = false } }
         do {
             let newSession = try await api.login(identity: identity, password: password)
             guard token == generation else { return }
             try SecureStore.save(SavedLogin(identity: identity.trimmingCharacters(in: .whitespacesAndNewlines), password: remember ? password : nil, session: newSession), key: "login")
             session = newSession; demo = false; selectedDate = Date(); status = "已登录"
         } catch { if token == generation { self.error = error.localizedDescription } }
+        guard token == generation else { return }
         busy = false
         if session != nil { await refresh() }
     }
@@ -114,6 +120,7 @@ import QingxinCore
         courses = []; lastUpdated = nil
         if let cache = SnapshotStore.read(identity: savedSession.studentNo, day: dateKey) {
             courses = cache.courses; lastUpdated = cache.updatedAt; status = "缓存课表 · 正在更新"
+            if dateKey == SchoolDate.key(Date()) { todayList = cache.courses; todayUpdated = cache.updatedAt; todayStatus = status }
         }
         do {
             let query: CourseQuery
@@ -130,12 +137,14 @@ import QingxinCore
             for index in courses.indices where confirmedSignatures.contains(courses[index].id) { courses[index].signed = true }
             lastUpdated = Date()
             status = query.fromWeeklyFallback ? "当天无课 · 显示本周课表" : (courses.isEmpty ? "当天暂无课程" : "课表已更新")
+            if dateKey == SchoolDate.key(Date()) { todayList = courses; todayUpdated = lastUpdated; todayStatus = status }
             try SnapshotStore.save(WidgetSnapshot(day: dateKey, updatedAt: Date(), courses: courses, isDemo: false), identity: savedSession.studentNo)
             if dateKey == SchoolDate.key(Date()) { await ReminderService.schedule(todayCourses, enabled: reminderEnabled) }
         } catch {
             guard token == generation, sequence == refreshSequence else { return }
             if error is CancellationError { return }
             status = lastUpdated == nil ? "课表更新失败" : "离线缓存 · 数据可能已变化"
+            if dateKey == SchoolDate.key(Date()) { todayStatus = status }
             self.error = error.localizedDescription
         }
     }
@@ -159,9 +168,9 @@ import QingxinCore
     }
     func sign(code: SignCode, course: Course? = nil) async {
         guard !demo, !signing, let savedSession = session else { return }
-        signing = true; error = nil; result = nil
-        defer { signing = false }
         let token = generation
+        signing = true; error = nil; result = nil
+        defer { if token == generation { signing = false } }
         let service = api
         do {
             let clock = try await schoolClock()
@@ -179,10 +188,11 @@ import QingxinCore
             }
             guard token == generation else { return }
             result = response
-            if response.outcome == .signed, let course, let index = courses.firstIndex(where: { $0.id == course.id }) {
+            if response.outcome == .signed, let course {
                 confirmedSignatures.insert(course.id)
-                courses[index].signed = true
-                try SnapshotStore.save(WidgetSnapshot(day: SchoolDate.key(selectedDate), updatedAt: Date(), courses: courses, isDemo: false), identity: savedSession.studentNo)
+                if let index = courses.firstIndex(where: { $0.id == course.id }) { courses[index].signed = true }
+                if let index = todayList.firstIndex(where: { $0.id == course.id }) { todayList[index].signed = true }
+                try SnapshotStore.save(WidgetSnapshot(day: SchoolDate.key(Date()), updatedAt: Date(), courses: todayList, isDemo: false), identity: savedSession.studentNo)
             }
             await refresh()
         } catch {
@@ -193,7 +203,7 @@ import QingxinCore
         let day = SchoolDate.key(Date())
         if day != foregroundDay {
             foregroundDay = day; todayExcluded = []; autoPlans = [:]; autoAttempts = [:]; confirmedSignatures = []
-            selectedDate = Date(); sample = nil; courses = []; lastUpdated = nil
+            selectedDate = Date(); sample = nil; courses = []; todayList = []; todayUpdated = nil; lastUpdated = nil
             await refresh()
         }
         guard autoForeground, !demo, session != nil, !signing, !busy else { return }
@@ -230,11 +240,12 @@ import QingxinCore
     func logout() {
         generation += 1; refreshSequence += 1
         SecureStore.remove("login"); session = nil; demo = false; courses = []; sample = nil
-        lastUpdated = nil; result = nil; busy = false; autoPlans = [:]; autoAttempts = [:]; todayExcluded = []; confirmedSignatures = []
-        status = "登录后查看今日课程"; SnapshotStore.clear(); ReminderService.clear()
+        lastUpdated = nil; result = nil; error = nil; busy = false; signing = false; autoPlans = [:]; autoAttempts = [:]; todayExcluded = []; confirmedSignatures = []
+        status = "登录后查看今日课程"; todayStatus = status; todayList = []; todayUpdated = nil
+        SnapshotStore.clear(); ReminderService.clear()
     }
     func enterDemo() {
-        generation += 1; refreshSequence += 1; busy = false
+        generation += 1; refreshSequence += 1; busy = false; signing = false; error = nil
         demo = true; selectedDate = Date(); lastUpdated = nil; result = nil; loadDemo()
     }
     private func loadDemo() {
@@ -245,10 +256,13 @@ import QingxinCore
             Course(scheduleId: "1000003", name: "科学前沿讲座", teacher: "示例教师", beginTime: "18:30", endTime: "20:00", day: day)
         ]
         status = "演示模式 · 示例课表不连接学校"; lastUpdated = Date()
+        if day == SchoolDate.key(Date()) { todayList = courses; todayStatus = status; todayUpdated = lastUpdated }
     }
     func exitDemo() {
         demo = false; courses = []; selectedDate = Date(); lastUpdated = nil; result = nil
+        todayList = []; todayUpdated = nil
         status = session == nil ? "登录后查看今日课程" : "请刷新课表"
+        todayStatus = status
     }
     func backgroundRefresh() async {
         guard !demo, let savedSession = session else { return }
@@ -256,9 +270,12 @@ import QingxinCore
         do {
             let query = try await api.courses(session: savedSession, dateKey: day)
             guard token == generation, !Task.isCancelled else { return }
-            let snapshot = WidgetSnapshot(day: day, updatedAt: Date(), courses: query.courses, isDemo: false)
+            todayList = query.courses.sorted { ($0.begin ?? .distantFuture) < ($1.begin ?? .distantFuture) }
+            for index in todayList.indices where confirmedSignatures.contains(todayList[index].id) { todayList[index].signed = true }
+            let snapshot = WidgetSnapshot(day: day, updatedAt: Date(), courses: todayList, isDemo: false)
             try SnapshotStore.save(snapshot, identity: savedSession.studentNo)
-            await ReminderService.schedule(query.courses.filter { $0.day == day }, enabled: reminderEnabled)
+            todayUpdated = snapshot.updatedAt; todayStatus = "今日课表已更新"
+            await ReminderService.schedule(todayCourses, enabled: reminderEnabled)
         } catch { /* Background refresh is best effort; foreground refresh presents errors. */ }
     }
 }

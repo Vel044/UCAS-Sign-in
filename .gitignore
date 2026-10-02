@@ -60,6 +60,7 @@ tools/out/
 
 # iOS local settings, caches, signing and build products
 ios-app/.build/
+ios-app/build-*/
 ios-app/.swiftpm/
 ios-app/Config/Local.xcconfig
 ios-app/**/xcuserdata/

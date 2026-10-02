@@ -39,7 +39,31 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C9B956F033AB62A111326F4C"
+               BuildableName = "QingxinAppTests.xctest"
+               BlueprintName = "QingxinAppTests"
+               ReferencedContainer = "container:Qingxin.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "8851BFB7C87935FC50516721"
+               BuildableName = "QingxinUITests.xctest"
+               BlueprintName = "QingxinUITests"
+               ReferencedContainer = "container:Qingxin.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

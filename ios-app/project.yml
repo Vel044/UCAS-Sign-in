@@ -44,6 +44,7 @@ targets:
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         BGTaskSchedulerPermittedIdentifiers: [com.vel.qingxin.refresh]
         UIBackgroundModes: [fetch]
         QingxinAppGroup: $(APP_GROUP_IDENTIFIER)
@@ -80,6 +81,28 @@ targets:
       path: Config/Widget.entitlements
       properties:
         com.apple.security.application-groups: [$(APP_GROUP_IDENTIFIER)]
+  QingxinUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Qingxin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(QINGXIN_BUNDLE_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Qingxin
+  QingxinAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [AppTests]
+    dependencies:
+      - target: Qingxin
+      - package: QingxinCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(QINGXIN_BUNDLE_ID).apptests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Qingxin:
     build:
@@ -87,5 +110,8 @@ schemes:
         Qingxin: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets: [QingxinAppTests, QingxinUITests]
     archive:
       config: Release

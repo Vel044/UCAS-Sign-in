@@ -7,6 +7,14 @@
 
 这是首版移植。真实账号登录、签到和真机通知仍需在学校服务环境中联调。
 
+## 界面预览
+
+以下为 iPhone 17 Pro / iOS 27 模拟器上的离线演示截图，所有签到操作均已禁用。
+
+<img src="screenshots/today-demo.png" width="260" alt="今日课程" />
+<img src="screenshots/manual-demo.png" width="260" alt="手动编号校验" />
+<img src="screenshots/schedule-demo.png" width="260" alt="日期课表" />
+
 ## 已实现
 
 | 功能 | iOS 实现 |
@@ -53,6 +61,19 @@ xcodebuild -project Qingxin.xcodeproj -scheme Qingxin \
 `xcodegen generate`，同时提交 `project.yml`、生成的工程及 plist / entitlements。
 应用与小组件均链接本地 `QingxinCore` Swift Package，无第三方运行时依赖。
 
+`scripts/verify.sh` 可一键运行协议测试和模拟器编译。运行 App 状态及界面测试可在 Xcode 按
+Command + U；命令行先从 `xcrun simctl list devices available` 选择设备 UUID，再运行：
+
+```sh
+xcodebuild -project Qingxin.xcodeproj -scheme Qingxin \
+  -destination 'id=YOUR_SIMULATOR_UUID' \
+  -derivedDataPath /private/tmp/qingxin-ios-derived \
+  -parallel-testing-enabled NO -collect-test-diagnostics never \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+建议把构建产物放在普通本地目录；iCloud 同步中的桌面目录可能阻塞模拟器加载测试组件。
+
 ### 真机安装
 
 1. 在 `Config/Local.xcconfig` 填入自己的 `DEVELOPMENT_TEAM`，并设置独占的
@@ -95,7 +116,11 @@ JSON 的 UTF-8 Base64。Base64 仅用于构建变量传输，不是加密：
   日 / 周课表回退、空值、签到成功条件、二维码过期、北京时间、课时边界、校时 TTL 和小组件跨天。
 - Xcode 27 / iOS Simulator SDK 27：主应用与 Widget 扩展编译通过；模拟器 arm64 / x86_64 均参与构建。
 - 校时端点只读联调成功；未使用真实学校账号，未提交真实签到。
-- 本机无已安装的 iOS Simulator runtime，尚未做模拟器界面运行、截图和 Widget 宿主验证。
+- iPhone 17 Pro / iOS 27.0 runtime：2 项 App 状态回归测试和 4 项 XCUITest 全部通过，
+  覆盖浏览其他日期时保留今日状态、退出登录清理数据、页面切换、编号校验和演示模式禁止签到。
+  已导出并人工检查今日、课表、手动打卡及设置截图。
+- iOS 设备架构下的主应用与 Widget 未签名编译通过。
+- 模拟器测试采用未签名构建；App Group 共享数据、Widget 宿主及通知送达仍需签名环境验证。
 - 未配置 Apple 签名团队，尚未验证真机安装、通知送达与后台刷新。
 - `Config/ios-ci.yml.example` 提供 GitHub Actions 模板，可复制到 `.github/workflows/ios.yml` 启用。
   当前 GitHub OAuth 凭据没有 `workflow` scope，因此模板先随源码交付，不触发远端 workflow 写入。

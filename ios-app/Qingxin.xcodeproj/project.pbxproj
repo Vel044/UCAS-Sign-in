@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0F8DDCA40A94AF4093539087 /* AGPL-3.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 72B3D7BD9A9612E54F2070A7 /* AGPL-3.0.txt */; };
 		14A04FAAD0983C4122E3CE36 /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE34541DB5022783DDDF582 /* SecureStore.swift */; };
 		29ED1C92E4CB372E557753B1 /* LectureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B8A3263100717FD2E12B86A /* LectureView.swift */; };
 		51363A96D95B63A5F1363E7F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E5AF153C6A2D6B2EF1536E41 /* Assets.xcassets */; };
@@ -16,14 +15,32 @@
 		572733BE997CACA7EC39CAD5 /* SnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 024BEC2F4C4DA72CBE465BCE /* SnapshotStore.swift */; };
 		582AA42E95B890C9D50E591A /* QRView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943BC794A3C4214AE66EFB69 /* QRView.swift */; };
 		5D8683686045A831D637E6D1 /* QingxinApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850F97553DE4FA0F3291D79D /* QingxinApp.swift */; };
+		6291DFF7B9D472C37BF3DC8B /* QingxinCore in Frameworks */ = {isa = PBXBuildFile; productRef = 24EDF861BD65D50435320E59 /* QingxinCore */; };
 		62D3F5DDA656470C9743B77D /* QingxinCore in Frameworks */ = {isa = PBXBuildFile; productRef = 10654269F113174BE2382BF2 /* QingxinCore */; };
+		740B402755603CFB6A1E3D83 /* QingxinUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18F0FB30323C83C179EDE426 /* QingxinUITests.swift */; };
 		B6987680A362144E85543348 /* QingxinWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 457DD49EBDF130CE9BE8620B /* QingxinWidget.swift */; };
+		D83E5CB24F228962B85C5026 /* AGPL-3.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 46BAA41B8C441FDF000F17AC /* AGPL-3.0.txt */; };
 		DF75E1E98C7A1F27A781691E /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C93FF58D410B25C4A654C62 /* AppState.swift */; };
+		E48BC4AC6FD03B95E7788DD9 /* AppStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC0285141EBB3E966568D7D /* AppStateTests.swift */; };
 		EF508B33F62B1FDA10003B98 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 972F15624E7E4ED349CC9A44 /* RootView.swift */; };
 		FFCD830CDFA7D5222614D1BE /* QingxinCore in Frameworks */ = {isa = PBXBuildFile; productRef = 646BBB29ECFEAF23808F9BA6 /* QingxinCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		1BDEEECC69CD68F6080F4F82 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CA8330C3E138F9B24524FD7D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4515C384F75C40DBEC61F4E9;
+			remoteInfo = Qingxin;
+		};
+		6549953E52C14628D2F200A9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CA8330C3E138F9B24524FD7D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 4515C384F75C40DBEC61F4E9;
+			remoteInfo = Qingxin;
+		};
 		D862777544E529C5F1E9B655 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = CA8330C3E138F9B24524FD7D /* Project object */;
@@ -49,13 +66,17 @@
 
 /* Begin PBXFileReference section */
 		024BEC2F4C4DA72CBE465BCE /* SnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotStore.swift; sourceTree = "<group>"; };
+		18F0FB30323C83C179EDE426 /* QingxinUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QingxinUITests.swift; sourceTree = "<group>"; };
 		3A2D6379808D04F34146C11B /* Qingxin.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Qingxin.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3AC0285141EBB3E966568D7D /* AppStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateTests.swift; sourceTree = "<group>"; };
 		3B8A3263100717FD2E12B86A /* LectureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LectureView.swift; sourceTree = "<group>"; };
 		428B184C8664E1F18F54E54C /* Local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Local.xcconfig; sourceTree = "<group>"; };
 		457DD49EBDF130CE9BE8620B /* QingxinWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QingxinWidget.swift; sourceTree = "<group>"; };
+		46BAA41B8C441FDF000F17AC /* AGPL-3.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "AGPL-3.0.txt"; sourceTree = "<group>"; };
 		4C93FF58D410B25C4A654C62 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		56DA2D4231988CF905D2DBBF /* QingxinAppTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = QingxinAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		59D9A39A6C3DBDB61ECBD2FF /* ReminderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReminderService.swift; sourceTree = "<group>"; };
-		72B3D7BD9A9612E54F2070A7 /* AGPL-3.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "AGPL-3.0.txt"; sourceTree = "<group>"; };
+		67FEF76F03AC6F393F30CFCB /* QingxinUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = QingxinUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		850F97553DE4FA0F3291D79D /* QingxinApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QingxinApp.swift; sourceTree = "<group>"; };
 		943BC794A3C4214AE66EFB69 /* QRView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRView.swift; sourceTree = "<group>"; };
 		972F15624E7E4ED349CC9A44 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -66,6 +87,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		590DDB7A8E3B2FD1799E5DA3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6291DFF7B9D472C37BF3DC8B /* QingxinCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		8ED540A93CABFEF9CE19210D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -93,13 +122,12 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
-		432E3E0B86103135C614BF35 /* UCAS-Sign-in */ = {
+		53CB5F04928F3579728AFD57 /* AppTests */ = {
 			isa = PBXGroup;
 			children = (
-				FECD4476F77E2B20239D0468 /* LICENSES */,
+				3AC0285141EBB3E966568D7D /* AppStateTests.swift */,
 			);
-			name = "UCAS-Sign-in";
-			path = ..;
+			path = AppTests;
 			sourceTree = "<group>";
 		};
 		5475B3897DB297F124C2361E /* Config */ = {
@@ -108,6 +136,23 @@
 				428B184C8664E1F18F54E54C /* Local.xcconfig */,
 			);
 			path = Config;
+			sourceTree = "<group>";
+		};
+		6152121AA559CCAC980E7371 /* LICENSES */ = {
+			isa = PBXGroup;
+			children = (
+				46BAA41B8C441FDF000F17AC /* AGPL-3.0.txt */,
+			);
+			path = LICENSES;
+			sourceTree = "<group>";
+		};
+		626E9263AA55A6C301D609A5 /* UCAS-Sign-in-iOS */ = {
+			isa = PBXGroup;
+			children = (
+				6152121AA559CCAC980E7371 /* LICENSES */,
+			);
+			name = "UCAS-Sign-in-iOS";
+			path = ..;
 			sourceTree = "<group>";
 		};
 		7480BF2DFEC2F9FAB2567EA4 /* Widget */ = {
@@ -122,18 +167,30 @@
 			isa = PBXGroup;
 			children = (
 				D6A9C96E6A1501D1D298CC32 /* App */,
+				53CB5F04928F3579728AFD57 /* AppTests */,
 				5475B3897DB297F124C2361E /* Config */,
 				245EE7BF03F0631C61C7B7C5 /* Packages */,
-				432E3E0B86103135C614BF35 /* UCAS-Sign-in */,
+				626E9263AA55A6C301D609A5 /* UCAS-Sign-in-iOS */,
+				A424C237FDB3B26CDFA9CC03 /* UITests */,
 				7480BF2DFEC2F9FAB2567EA4 /* Widget */,
 				B01D2B260D5D21A02467F4FE /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		A424C237FDB3B26CDFA9CC03 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				18F0FB30323C83C179EDE426 /* QingxinUITests.swift */,
+			);
+			path = UITests;
 			sourceTree = "<group>";
 		};
 		B01D2B260D5D21A02467F4FE /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				3A2D6379808D04F34146C11B /* Qingxin.app */,
+				56DA2D4231988CF905D2DBBF /* QingxinAppTests.xctest */,
+				67FEF76F03AC6F393F30CFCB /* QingxinUITests.xctest */,
 				A171B1C465E93E7A0232AC6B /* QingxinWidget.appex */,
 			);
 			name = Products;
@@ -153,14 +210,6 @@
 				024BEC2F4C4DA72CBE465BCE /* SnapshotStore.swift */,
 			);
 			path = App;
-			sourceTree = "<group>";
-		};
-		FECD4476F77E2B20239D0468 /* LICENSES */ = {
-			isa = PBXGroup;
-			children = (
-				72B3D7BD9A9612E54F2070A7 /* AGPL-3.0.txt */,
-			);
-			path = LICENSES;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -188,6 +237,24 @@
 			productReference = 3A2D6379808D04F34146C11B /* Qingxin.app */;
 			productType = "com.apple.product-type.application";
 		};
+		8851BFB7C87935FC50516721 /* QingxinUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1DCCD5480F710DB298811382 /* Build configuration list for PBXNativeTarget "QingxinUITests" */;
+			buildPhases = (
+				18D9213E961DEC23E304557C /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F8CC9413A1E25935CD52D55C /* PBXTargetDependency */,
+			);
+			name = QingxinUITests;
+			packageProductDependencies = (
+			);
+			productName = QingxinUITests;
+			productReference = 67FEF76F03AC6F393F30CFCB /* QingxinUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		C0169206A85CC9276B03DCB4 /* QingxinWidget */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = D2555BA66ABFC599F24E5D89 /* Build configuration list for PBXNativeTarget "QingxinWidget" */;
@@ -207,6 +274,26 @@
 			productReference = A171B1C465E93E7A0232AC6B /* QingxinWidget.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		C9B956F033AB62A111326F4C /* QingxinAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 29FF391713FA1CDA9D41ED83 /* Build configuration list for PBXNativeTarget "QingxinAppTests" */;
+			buildPhases = (
+				76B89F64FB4414D7CA6BBEA8 /* Sources */,
+				590DDB7A8E3B2FD1799E5DA3 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5A1586D0A359FCCA5DEFC074 /* PBXTargetDependency */,
+			);
+			name = QingxinAppTests;
+			packageProductDependencies = (
+				24EDF861BD65D50435320E59 /* QingxinCore */,
+			);
+			productName = QingxinAppTests;
+			productReference = 56DA2D4231988CF905D2DBBF /* QingxinAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -219,7 +306,14 @@
 					4515C384F75C40DBEC61F4E9 = {
 						ProvisioningStyle = Automatic;
 					};
+					8851BFB7C87935FC50516721 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 4515C384F75C40DBEC61F4E9;
+					};
 					C0169206A85CC9276B03DCB4 = {
+						ProvisioningStyle = Automatic;
+					};
+					C9B956F033AB62A111326F4C = {
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -242,6 +336,8 @@
 			projectRoot = "";
 			targets = (
 				4515C384F75C40DBEC61F4E9 /* Qingxin */,
+				C9B956F033AB62A111326F4C /* QingxinAppTests */,
+				8851BFB7C87935FC50516721 /* QingxinUITests */,
 				C0169206A85CC9276B03DCB4 /* QingxinWidget */,
 			);
 		};
@@ -252,7 +348,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				0F8DDCA40A94AF4093539087 /* AGPL-3.0.txt in Resources */,
+				D83E5CB24F228962B85C5026 /* AGPL-3.0.txt in Resources */,
 				51363A96D95B63A5F1363E7F /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -265,6 +361,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				B6987680A362144E85543348 /* QingxinWidget.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		18D9213E961DEC23E304557C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				740B402755603CFB6A1E3D83 /* QingxinUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		76B89F64FB4414D7CA6BBEA8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E48BC4AC6FD03B95E7788DD9 /* AppStateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -291,9 +403,53 @@
 			target = C0169206A85CC9276B03DCB4 /* QingxinWidget */;
 			targetProxy = D862777544E529C5F1E9B655 /* PBXContainerItemProxy */;
 		};
+		5A1586D0A359FCCA5DEFC074 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4515C384F75C40DBEC61F4E9 /* Qingxin */;
+			targetProxy = 6549953E52C14628D2F200A9 /* PBXContainerItemProxy */;
+		};
+		F8CC9413A1E25935CD52D55C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 4515C384F75C40DBEC61F4E9 /* Qingxin */;
+			targetProxy = 1BDEEECC69CD68F6080F4F82 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		06F57112BA1C670C5C1BBEE6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QINGXIN_BUNDLE_ID).uitests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Qingxin;
+			};
+			name = Debug;
+		};
+		0E0BE7C8F91157FB8288E3FA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QINGXIN_BUNDLE_ID).apptests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Qingxin.app/Qingxin";
+			};
+			name = Release;
+		};
 		20AB319BEF8B40B08CEAB60A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 428B184C8664E1F18F54E54C /* Local.xcconfig */;
@@ -447,6 +603,23 @@
 			};
 			name = Release;
 		};
+		87C592B13E8062CB3109126B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QINGXIN_BUNDLE_ID).apptests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Qingxin.app/Qingxin";
+			};
+			name = Debug;
+		};
 		9DA0FA5F954C06A578E7BE7D /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -501,9 +674,44 @@
 			};
 			name = Release;
 		};
+		E740B9FCF1E638245CD678BA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "$(QINGXIN_BUNDLE_ID).uitests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Qingxin;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1DCCD5480F710DB298811382 /* Build configuration list for PBXNativeTarget "QingxinUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				06F57112BA1C670C5C1BBEE6 /* Debug */,
+				E740B9FCF1E638245CD678BA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		29FF391713FA1CDA9D41ED83 /* Build configuration list for PBXNativeTarget "QingxinAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				87C592B13E8062CB3109126B /* Debug */,
+				0E0BE7C8F91157FB8288E3FA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		6C192DCE9261CB9CA77673E1 /* Build configuration list for PBXNativeTarget "Qingxin" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -542,6 +750,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		10654269F113174BE2382BF2 /* QingxinCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = QingxinCore;
+		};
+		24EDF861BD65D50435320E59 /* QingxinCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = QingxinCore;
 		};
