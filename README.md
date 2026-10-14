@@ -4,14 +4,6 @@
 
 面向国科大轻新课堂 / iClass 的 Android 客户端：当天课程查询、一键签到、二维码时间轴同步、跨安卓桌面小部件（含小米负一屏）。
 
-## iOS 移植（本 fork）
-
-新增原生 SwiftUI + WidgetKit 工程，支持 iOS / iPadOS 17+。
-登录、课表、手动签到、同步二维码、前台自动签到、通知提醒和桌面小组件已实现。
-后台刷新由 iOS 调度；后台 / 锁屏准时自动签到不保证。讲座页采用学校网页登录。
-构建、真机签名、接口配置及已知限制见 [`ios-app/README.md`](./ios-app/README.md)。
-分支：[ios-port](https://github.com/Vel044/UCAS-Sign-in/tree/ios-port)。
-
 > [!CAUTION]
 > **本项目仅供学习交流使用，请勿用于任何商业用途或非法用途。**
 
@@ -311,6 +303,15 @@ App 内 **设置 → 查看手动添加步骤** 会按当前桌面自动给出�
 隐私：检查更新只对 GitHub 公开接口发一次只读 GET，**不携带账号、token 或设备标识**；
 GitHub 的地址是公开且通用的（与本项目公开仓库一致），不属于「校内端点」，
 因此它与 iClass / 讲座等地址不同，直接写在源码里而不走 `local.properties`。
+
+## iOS / iPadOS 移植（预览）
+
+`ios-app/` 提供基于现有接口协议的原生 SwiftUI + WidgetKit 实现，支持 iOS / iPadOS 17+。
+包含登录、课表、手动签到、同步二维码、前台自动签到、通知提醒和桌面小组件。
+后台刷新由 iOS 调度；后台 / 锁屏准时自动签到不保证。讲座页采用学校网页登录。
+构建、签名、接口配置和已知限制见 [`ios-app/README.md`](./ios-app/README.md)。
+社区移植的预览安装包见 [iOS Release](https://github.com/Vel044/UCAS-Sign-in/releases/tag/ios-v0.1.0)，
+安装说明见 [`ios-app/RELEASE.md`](./ios-app/RELEASE.md)。
 
 ## 致谢 / 上游项目
 
