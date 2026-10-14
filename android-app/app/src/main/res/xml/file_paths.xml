@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  日志分享放行的目录。
+
+  只放行 logs/ 一个子目录：分享出去的 content:// URI 无法越出这里，
+  因此即便别处出了漏洞，也读不到私有目录里的其他文件（凭据、缓存、课程数据）。
+-->
+<paths>
+    <files-path
+        name="logs"
+        path="logs/" />
+</paths>

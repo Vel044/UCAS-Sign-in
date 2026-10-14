@@ -6,10 +6,13 @@ import com.ucas.qingxin.signin.data.CourseQueryResult
 import com.ucas.qingxin.signin.data.SchoolSession
 import com.ucas.qingxin.signin.data.SignOutcome
 import com.ucas.qingxin.signin.data.SignResult
+import com.ucas.qingxin.signin.logging.LogKind
+import com.ucas.qingxin.signin.logging.SignLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -24,6 +27,14 @@ import java.util.regex.Pattern
  */
 class QingxinApiService(
     private val client: OkHttpClient = defaultClient(),
+    /**
+     * 签到相关的诊断日志；`null` 表示不记（单测与不关心日志的调用方）。
+     *
+     * 放在 API 层而不是界面层，是因为**最有诊断价值的东西只有这里有**：
+     * 学校响应正文。界面能拿到的是已经翻译过的 [SignResult]，
+     * 一旦「已失效」这类含糊拒绝出现，没有正文就无法分辨是码过期还是参数不对。
+     */
+    private val log: SignLog? = null,
 ) {
     companion object {
         /**
@@ -223,7 +234,7 @@ class QingxinApiService(
             .addQueryParameter("timestamp", schoolTimestampMs.toString())
             .addQueryParameter("id", session.userId)
             .build()
-        val json = executeJson(
+        val json = executeJsonLogged(
             Request.Builder()
                 .url(url)
                 .header("User-Agent", USER_AGENT)
@@ -232,8 +243,39 @@ class QingxinApiService(
                 .get()
                 .build(),
             timeoutSec = 10,
+            source = "一键 / 手动打卡（GET）",
         )
         parseSignResult(json)
+    }
+
+    /**
+     * 发一次请求并记日志，返回解析后的 JSON。
+     *
+     * 日志写在**这里**而不是各个调用点：这样「请求地址 + 响应正文 + 判定结果」
+     * 一定成组出现，不会出现只记了一半、事后无法配对的日志。
+     */
+    private fun executeJsonLogged(request: Request, timeoutSec: Long, source: String): JSONObject {
+        val logger = log
+        if (logger == null) return executeJson(request, timeoutSec)
+
+        logger.append(
+            LogKind.REQUEST,
+            "来源" to source,
+            "方法" to request.method,
+            "地址" to SignLog.maskOwnId(request.url.toString()),
+        )
+        return try {
+            val (json, body) = executeJsonWithBody(request, timeoutSec)
+            logger.append(LogKind.RESPONSE, "HTTP" to "200", "正文" to body)
+            json
+        } catch (e: Exception) {
+            // 失败也要记：现场最常见的失败就是网络层直接抛。
+            logger.append(
+                LogKind.RESPONSE,
+                "异常" to (e::class.java.simpleName + ": " + (e.message ?: "")),
+            )
+            throw e
+        }
     }
 
     /** Build QR content URL exactly as original ez0.d(). */
@@ -244,6 +286,94 @@ class QingxinApiService(
             .addQueryParameter("timestamp", schoolTimestampMs.toString())
             .build()
             .toString()
+    }
+
+    /**
+     * 组装扫码通道的签到地址：把二维码里的 query 拼到**本项目自己的**学校域名上。
+     *
+     * 对应小程序的 `o.data.schoolHttpsUrl + n`。本项目的 [BASE_URL] 已经含 `/app/`
+     * 前缀（与小程序配置里的 host 少一段 `app/` 正好互补），所以这里只再补
+     * `ScanPayload.SIGN_PATH` 即可。
+     *
+     * @param path 相对 [BASE_URL] 的接口路径，取自
+     *   `com.ucas.qingxin.signin.attendance.ScanPayload.SignRequest.path`。
+     */
+    fun buildScanUrl(path: String, query: String): String {
+        val base = BASE_URL + path
+        if (query.isBlank()) return base
+        // 用 encodedQuery 而不是 addQueryParameter：二维码里的 query 本来就是编码过的，
+        // 再走一遍参数编码会把 `%2F` 之类变成 `%252F`，学校那边就认不出了。
+        return runCatching { base.toHttpUrl().newBuilder().encodedQuery(query).build().toString() }
+            .getOrElse {
+                // 二维码里带了 HttpUrl 认为非法的字符（极罕见）。不静默丢参数，
+                // 原样拼上去交给服务器判 —— 我们这边只保证不因一个畸形二维码崩掉。
+                "$base?$query"
+            }
+    }
+
+    /**
+     * 扫码签到：把二维码里读到的参数**原样**提交。
+     *
+     * ## 与小程序逐字对齐
+     * `cliclScanCode` 命中 `app/course/stu_scan_sign.action` 之后做的是：
+     * 取 `?` 之后的 query → 拼到自己学校的域名下 → 追加 `&id=<uid>` → **POST**
+     * （空表单体）→ 以 `STATUS == "0"` 判成功。这里三点全部照做：
+     *
+     * 1. **POST 而不是 GET**。一键签到（[submitAttendance]）走 GET，那是原版
+     *    RememberSignIn 的形态；扫码这条通道小程序用的是 POST。两者在本项目里
+     *    各自保留，谁也不要「统一」成对方 —— 同一个学校对不同历史实现的兼容程度不同，
+     *    把已验证过的请求形态改掉是在拿唯一稳定的参照物冒险。
+     * 2. **`timestamp` 不新增**：二维码带了就原样带着，二维码没带就**不补**
+     *    （见 `ScanPayload.DirectSign.needsTimestamp`）。小程序这一步只有
+     *    `二维码query + "&id=" + uid`，从不写时间戳；1.3.1 曾在这里自行补一个，
+     *    已按「不偏离唯一已知可用的客户端」改掉（`docs/lecture-signin-research.md` §10.16）。
+     * 3. **`id` 用本次登录用户自己的** —— 小程序的 `userInfo.uid` 与我们的
+     *    `session.userId` 是同一个字段。
+     *
+     * ## 与小程序唯一的**故意**差异：域名
+     * 二维码若带完整 url，小程序会丢掉它的域名、只用自己配置的学校域名；这里同样丢掉，
+     * 理由不止「保持一致」——`sessionId` 是 [BASE_URL] 这台服务器签发的，
+     * 发到别的域名上必然认证失败，而且等于把会话凭据主动送给二维码里随便写的域名。
+     * 因此传进来的地址必须是**已经落在 [BASE_URL] 上**的（见 [buildScanUrl]）。
+     */
+    suspend fun submitScanSign(session: SchoolSession, path: String, query: String): SignResult =
+        withContext(Dispatchers.IO) {
+            val url = withOwnUserId(buildScanUrl(path, query), session.userId)
+            val json = executeJsonLogged(
+                Request.Builder()
+                    .url(url)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Cache-Control", "no-store")
+                    .header("sessionId", session.sessionId)
+                    // 空表单体 + `application/x-www-form-urlencoded`：这正是小程序的
+                    // `requestPost(url, null, {})`（缺省 content-type 同为表单）。
+                    .post(FormBody.Builder().build())
+                    .build(),
+                timeoutSec = 10,
+                source = "扫码打卡（POST 空表单体）",
+            )
+            parseSignResult(json, requireStuSignStatus = false)
+        }
+
+    /**
+     * 追加本次登录用户自己的 `id`。
+     *
+     * 与小程序一样是「在末尾追加 `&id=`」，但**先清掉二维码里可能自带的 `id`**：
+     * 小程序的 `url + "&id=" + uid` 在遇到恶意二维码（`…&id=<别人的 uid>`）时，
+     * 服务端取到哪一个取决于它自己的解析实现 —— 这属于用户**完全无法察觉**的错签。
+     * 用 [okhttp3.HttpUrl.Builder.setQueryParameter] 是同名覆盖，正常二维码
+     * （本来就不带 id）的行为与小程序的字符串拼接完全一致。
+     */
+    private fun withOwnUserId(rawUrl: String, userId: String): String {
+        val parsed = rawUrl.toHttpUrlOrNull()
+        if (parsed != null) {
+            return parsed.newBuilder().setQueryParameter("id", userId).build().toString()
+        }
+        // 退化路径：地址不合法到连 HttpUrl 都解析不出来（几乎不会发生，
+        // 因为传来的地址是我们自己用 BASE_URL 拼的）。仍然尽力剔除自带的 id。
+        val cleaned = rawUrl.replace(Regex("""[?&]id=[^&#]*"""), "").trimEnd('&', '?')
+        val sep = if (cleaned.contains('?')) "&" else "?"
+        return cleaned + sep + "id=" + userId
     }
 
     /**
@@ -320,14 +450,34 @@ class QingxinApiService(
         return if (d.length >= DAY_KEY_LENGTH) d.take(DAY_KEY_LENGTH) else d
     }
 
-    private fun parseSignResult(json: JSONObject): SignResult {
-        val result = json.optJSONObject("result") ?: JSONObject()
-        val status = json.optString("STATUS")
-        val errCode = json.optString("ERRCODE").take(64)
+    /**
+     * 解析签到结果。
+     *
+     * @param requireStuSignStatus 是否必须看到 `result.stuSignStatus == "1"` 才算签到成功。
+     *
+     *   一键签到（GET）的响应里带这个字段，所以要求它 —— 它能挡掉
+     *   「`STATUS=0` 但其实不在签到时间」这种假成功。
+     *
+     *   扫码通道（POST，与小程序一致）则**只认 `STATUS == "0"`**：小程序的
+     *   `gotoSignWithUrl` 就是这么判的。我校这两条通道的响应形态由学校那侧决定，
+     *   我们无法穷举；若在扫码通道上强求一个可能根本不存在的字段，
+     *   真签到成功了也会被我们显示成「不在签到时间」。
+     */
+    private fun parseSignResult(json: JSONObject, requireStuSignStatus: Boolean = true): SignResult {
+        // 7.0 平台（app/common/stuScanSign）把结果包在 data 里 —— 小程序的
+        // gotoNewSignWithUrl 读的正是 o.data.STATUS；旧通道则在顶层。
+        val root = if (json.has("STATUS") || json.has("result")) {
+            json
+        } else {
+            json.optJSONObject("data") ?: json
+        }
+        val result = root.optJSONObject("result") ?: JSONObject()
+        val status = root.optString("STATUS")
+        val errCode = root.optString("ERRCODE").take(64)
         var msg = result.optString("msg")
-        if (msg.isBlank()) msg = json.optString("ERRMSG")
-        if (msg.isBlank()) msg = json.optString("msg")
-        if (msg.isBlank()) msg = json.optString("message")
+        if (msg.isBlank()) msg = root.optString("ERRMSG")
+        if (msg.isBlank()) msg = root.optString("msg")
+        if (msg.isBlank()) msg = root.optString("message")
         val stuSignStatus = result.optString("stuSignStatus")
         val expired = Pattern.compile(
             "(二维码|签到码).*(失效|过期)|timestamp.*(invalid|expired)",
@@ -335,13 +485,16 @@ class QingxinApiService(
         ).matcher(msg).find()
         val outside = Pattern.compile("未在上课时间|不在.*签到时间|不是上课时间|未选.*课|不属于.*课|已签到|重复签到")
             .matcher(msg).find()
+        // 「学校明确拒绝了这次签到」的形态：STATUS 说成功，但它自己给的签到状态不是 1。
+        // 仅在要求该字段的通道上有意义（见 requireStuSignStatus 的说明）。
+        val rejectedBySignStatus = status == "0" && stuSignStatus.isNotBlank() && stuSignStatus != "1"
 
         val outcome = when {
             expired -> SignOutcome.QR_EXPIRED
             status == "0" && (errCode.isBlank() || errCode == "0") &&
-                stuSignStatus == "1" &&
-                (!json.has("success") || json.optBoolean("success", true)) -> SignOutcome.SIGNED
-            outside || !(status == "0" && stuSignStatus.isNotBlank() && stuSignStatus != "1") ->
+                (!requireStuSignStatus || stuSignStatus == "1") &&
+                (!root.has("success") || root.optBoolean("success", true)) -> SignOutcome.SIGNED
+            outside || !(requireStuSignStatus && rejectedBySignStatus) ->
                 SignOutcome.OUTSIDE_SIGN_WINDOW
             else -> SignOutcome.SIGN_RESULT_UNKNOWN
         }
@@ -376,7 +529,16 @@ class QingxinApiService(
         return builder
     }
 
-    private fun executeJson(request: Request, timeoutSec: Long = 15): JSONObject {
+    private fun executeJson(request: Request, timeoutSec: Long = 15): JSONObject =
+        executeJsonWithBody(request, timeoutSec).first
+
+    /**
+     * 与 [executeJson] 相同，但**同时**把响应正文回传。
+     *
+     * 只有需要写诊断日志的调用方用它（见 [log] 的说明）：正文是分辨
+     * 「学校不认这个标识」与「我们的参数不对」的唯一原始依据。
+     */
+    private fun executeJsonWithBody(request: Request, timeoutSec: Long = 15): Pair<JSONObject, String> {
         val callClient = if (timeoutSec == 15L) {
             client
         } else {
@@ -390,7 +552,7 @@ class QingxinApiService(
             if (!response.isSuccessful) {
                 throw ApiException("HTTP_${response.code}", "网络请求失败 (${response.code})")
             }
-            return JSONObject(body.ifBlank { "{}" })
+            return JSONObject(body.ifBlank { "{}" }) to body
         }
     }
 }

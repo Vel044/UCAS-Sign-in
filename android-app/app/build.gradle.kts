@@ -131,8 +131,13 @@ android {
         minSdk = 26
         targetSdk = 35
         // versionCode 必须单调递增：任何低于已装版本的数值都会导致无法覆盖安装。
-        versionCode = 43
-        versionName = "1.2.2"
+        // 43 → 44：新增「扫码打卡」（相机扫码 + 载荷分类 + 走学校扫码通道提交）。
+        // 44 → 45：修 1.3.0 的页头布局 —— 扫码入口挤掉了学号的显示宽度。
+        // 45 → 46：扫码失败时把「二维码原文 / 本次提交」摊给用户看；去掉扫码通道
+        //           多补的 timestamp（改为纯重放）；新增「签到日志」（设置里可查看/分享/保存）。
+        versionCode = 46
+        // 1.3.1 → 1.3.2：扫码通道只去掉一处多余的参数，其余是新的诊断能力。
+        versionName = "1.3.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 端点来自本地 local.properties，绝不硬编码（见文件顶部说明）。
@@ -321,6 +326,25 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.google.zxing:core:3.5.3")
+    /*
+     * 扫码依赖：相机层走 CameraX，不用 Camera1。
+     *
+     * ## 为什么不用 zxing-android-embedded（依赖更省的那个）
+     * 它的相机链路是 Camera1，且 2021-10 后停更：上游 issue #740「Android 12+ 自动对焦失效」
+     * 在 Pixel 6 / Android 14、Redmi Note 10 5G / Android 12、Galaxy S20+ / Android 13 上均已复现；
+     * issue #741 另有 Redmi 10C / Android 13 上部分二维码格式识别失败的记录。
+     * 扫码靠对焦，对焦坏等于功能坏 —— 这两条正好打在「跨 Android 版本 / 跨国产 ROM」上。
+     *
+     * ## 为什么是它
+     * CameraX 会随每个 Android 版本持续修复并内置厂商怪癖绕过（正是要覆盖的两个维度），
+     * 而 zxing-lite 已把旋转 / 对焦 / 裁剪 / 预览缩放这些最易在个别机型翻车的地方封装好。
+     * 它自带的 zxing:core 会与上面那行取高版本，解码逻辑仍是同一个 ZXing。
+     *
+     * ## 与 Compose 的关系
+     * 其入口签名是 (androidx.activity.ComponentActivity, PreviewView)，**不是** AppCompatActivity，
+     * 因此可直接嵌进本应用既有的 Compose `AndroidView(PreviewView)`，主题无需改成 AppCompat。
+     */
+    implementation("com.github.jenly1314:zxing-lite:3.5.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

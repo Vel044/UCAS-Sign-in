@@ -38,6 +38,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -47,7 +49,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -86,6 +91,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.ucas.qingxin.signin.R
+import com.ucas.qingxin.signin.QingxinApp
 import com.ucas.qingxin.signin.attendance.AutoSignExclusions
 import com.ucas.qingxin.signin.attendance.KeepAliveHelper
 import com.ucas.qingxin.signin.data.AttendanceUiStatus
@@ -101,7 +107,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-private enum class AppScreen { Home, Schedule, Lecture, LectureSchedule, Manual, Settings }
+private enum class AppScreen { Home, Schedule, Lecture, LectureSchedule, Manual, Scan, Settings, Logs }
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -122,6 +128,14 @@ class MainActivity : ComponentActivity() {
      * 也不需要当前课表，因此与 [lectureVm] 共享状态只会带来无谓的耦合。
      */
     private val manualVm: ManualSignViewModel by viewModels()
+
+    /**
+     * 「扫码打卡」页的 ViewModel。
+     *
+     * **独立**是有意的：它只认「相机当场读到的二维码」，既不读课表也不读讲座通知，
+     * 因此与 [manualVm] 共享状态只会带来无谓的耦合。
+     */
+    private val scanVm: ScanViewModel by viewModels()
 
     /**
      * 「讲座预告（预约系统）」页的 ViewModel。
@@ -146,6 +160,7 @@ class MainActivity : ComponentActivity() {
             val lectureScheduleState by lectureScheduleVm.ui.collectAsStateWithLifecycle()
             val scheduleState by scheduleVm.ui.collectAsStateWithLifecycle()
             val manualState by manualVm.ui.collectAsStateWithLifecycle()
+            val scanState by scanVm.ui.collectAsStateWithLifecycle()
             // 用 rememberSaveable：旋屏 / 进程重建后仍停留在同一页，而不是突然跳回首页。
             var screen by rememberSaveable { mutableStateOf(AppScreen.Home) }
             // 前台可见性：任何子页面都算「前台」，但只有主页需要二维码。
@@ -171,7 +186,17 @@ class MainActivity : ComponentActivity() {
                                 state = state,
                                 vm = vm,
                                 onBack = { screen = AppScreen.Home },
+                                onOpenLogs = { screen = AppScreen.Logs },
                             )
+                            screen == AppScreen.Logs -> {
+                                // 日志器挂在 Application 上：API 层（唯一能看到学校响应正文的
+                                // 地方）也往同一个实例里写，因此这里必须取同一份。
+                                val app = LocalContext.current.applicationContext as QingxinApp
+                                LogScreen(
+                                    log = app.signLog,
+                                    onBack = { screen = AppScreen.Settings },
+                                )
+                            }
                             screen == AppScreen.Lecture -> LectureScreen(
                                 state = lectureState,
                                 vm = lectureVm,
@@ -189,6 +214,11 @@ class MainActivity : ComponentActivity() {
                                 vm = manualVm,
                                 onBack = { screen = AppScreen.Home },
                             )
+                            screen == AppScreen.Scan -> ScanScreen(
+                                state = scanState,
+                                vm = scanVm,
+                                onBack = { screen = AppScreen.Home },
+                            )
                             screen == AppScreen.Schedule -> ScheduleScreen(
                                 state = scheduleState,
                                 vm = scheduleVm,
@@ -200,6 +230,13 @@ class MainActivity : ComponentActivity() {
                                 onOpenLecture = { screen = AppScreen.Lecture },
                                 onOpenSchedule = { screen = AppScreen.Schedule },
                                 onOpenManualSign = { screen = AppScreen.Manual },
+                                onOpenScan = {
+                                    // 每次进扫码页都从零开始：上一次的结果（或上一次
+                                    // 未点「继续扫码」的终态）留着会让用户看到一张
+                                    // 与自己刚扫的码无关的卡片。
+                                    scanVm.reset()
+                                    screen = AppScreen.Scan
+                                },
                                 onOpenSettings = { screen = AppScreen.Settings },
                             )
                         }
@@ -333,6 +370,7 @@ private fun HomeScreen(
     onOpenLecture: () -> Unit,
     onOpenSchedule: () -> Unit,
     onOpenManualSign: () -> Unit,
+    onOpenScan: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     // 进入主页时按需自动检查更新（节流默认 24 小时，见 MainViewModel.onEnterHome）。
@@ -345,39 +383,13 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "轻新签到",
-                        style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Serif),
-                    )
-                    Text(
-                        "学号 ${state.studentNo}",
-                        color = Color(0xFF4A5C55),
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                // 三个入口按钮 + 标题挤在一行：把按钮的横向内边距收窄，
-                // 否则在 360dp 宽度的机型上学号会被压成两行。
-                TextButton(
-                    onClick = onOpenSchedule,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) { Text("课表") }
-                TextButton(
-                    onClick = onOpenLecture,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) { Text("讲座") }
-                TextButton(
-                    onClick = onOpenSettings,
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) { Text("设置") }
-            }
+            HomeHeader(
+                studentNo = state.studentNo,
+                onOpenScan = onOpenScan,
+                onOpenSchedule = onOpenSchedule,
+                onOpenLecture = onOpenLecture,
+                onOpenSettings = onOpenSettings,
+            )
         }
         // 更新提示横幅。
         //
@@ -488,6 +500,127 @@ private fun HomeScreen(
                         course.beginTime == state.current.beginTime),
                 onClick = { vm.selectCourse(course) },
             )
+        }
+    }
+}
+
+/**
+ * 主页页头：标题 + 扫码入口，以及学号 + 三个浏览入口。
+ *
+ * ## 为什么单独抽出来，且明确写下宽度契约
+ * 这一块是「谁会被挤掉」的高发区，而且挤掉的后果很具体：学号显示不全、
+ * 或者扫码入口在实机上被压到看不见。抽成具名 composable 之后，
+ * 宽度账算在**一处**，改这里的人一眼能看到代价，不必去翻 LazyColumn 里的布局。
+ *
+ * ## 宽度账（1080px @480dpi 的 360dp 机型，横向内边距 16dp×2 → 可用 328dp）
+ * - 第一行：标题（弹性，`weight(1f)`）+ 扫码按钮 40dp → 标题有 288dp，绰绰有余。
+ * - 第二行：学号（弹性）+ 三个文字按钮，每个钉死 48dp（见下方注释）→ 共 144dp，
+ *   **学号拿到 184dp**。
+ *
+ * 下面的数字都是模拟器实测（不是估算）：13sp 下「学号 」前缀约 25dp，
+ * 每个字符约 7.7dp。
+ *
+ * | 学号长度 | 实测文字宽 | 右缘余量 |
+ * | --- | --- | --- |
+ * | 12 位 | 125.3dp | 58.7dp |
+ * | 13 位 | 133.0dp | 51.0dp |
+ * | 15 字 | 149.3dp | 34.7dp |
+ *
+ * ## 这里踩过的坑（别再踩一次）
+ * 1.3.0 把扫码图标塞进**学号那一行**，学号只剩 114dp，当场被截断（实机反馈）。
+ * 根因是两个数没算对：`TextButton` 的**最小宽度 58dp 压不下去**（收窄
+ * `contentPadding` 无效，必须在**外层**给宽度），以及扫码图标要占 40dp。
+ * 因此：**扫码入口与学号必须分属两行**，谁也别再往对方那一行里加东西；
+ * 而那一行的三个文字按钮，宽度必须显式钉死。
+ *
+ * 若将来要在第二行加入口，先按上表确认余量 —— 不够就把新入口放到别处，
+ * 而不是让它去挤学号。
+ */
+@Composable
+private fun HomeHeader(
+    studentNo: String,
+    onOpenScan: () -> Unit,
+    onOpenSchedule: () -> Unit,
+    onOpenLecture: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "轻新签到",
+                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Serif),
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            // 扫码打卡：本页**唯一**的实心按钮，刻意放在最右（即右上角）。
+            //
+            // 为什么值得占这个位置：现场打卡是「站在班牌前、一刻也不想等」的场景，
+            // 而它是这条路径上最短的一条 —— 打开应用、点这里、对准，三步结束；
+            // 手动打卡要多一次输入，「一键签到」还得先等课表刷出二维码。
+            // 因此它不该和课表 / 讲座 / 设置一样只是枚浅色文字按钮：
+            // 那样在视觉上与「浏览类」入口毫无区别，现场翻半天找不到。
+            //
+            // 只用一枚 40dp 的图标而不带文字：这一行留给标题，宽度很充裕。
+            FilledIconButton(
+                onClick = onOpenScan,
+                modifier = Modifier.size(40.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = Color(0xFF0F6B4C),
+                    contentColor = Color.White,
+                ),
+            ) {
+                Icon(
+                    Icons.Filled.QrCodeScanner,
+                    contentDescription = "扫码打卡",
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "学号 $studentNo",
+                color = Color(0xFF4A5C55),
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // 三个入口按钮的宽度**必须钉死**，不能听任 Material 的默认值。
+            //
+            // `TextButton` 内部会套一层 `defaultMinSize(minWidth = 58dp)`：
+            // 只收窄 `contentPadding` 是没用的，每个按钮仍然占 58dp、三个共 174dp。
+            // 而它们的文字（两个汉字，14sp）只有 28dp 宽 —— 等于每个按钮白占 30dp。
+            // 外层显式给宽度后，那层 `defaultMinSize` 会按传入的 maxWidth 收缩，
+            // 于是每个按钮 48dp（正好是触控目标下限），三个共 144dp，
+            // 学号那一栏因此从 154dp 涨到 184dp。
+            //
+            // `contentPadding = 8dp` 不能再放大：8+8 加上 28dp 文字 = 44dp ≤ 48dp，
+            // 刚好容得下；用回 Material 默认的 12dp 就会超宽、把「课表」挤成两行。
+            Row {
+                TextButton(
+                    onClick = onOpenSchedule,
+                    modifier = Modifier.width(48.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) { Text("课表") }
+                TextButton(
+                    onClick = onOpenLecture,
+                    modifier = Modifier.width(48.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) { Text("讲座") }
+                TextButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier.width(48.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) { Text("设置") }
+            }
         }
     }
 }
@@ -969,10 +1102,40 @@ private fun openReleasePage(context: Context, release: UpdateRelease) {
 }
 
 @Composable
+/**
+ * 「签到日志」入口。
+ *
+ * 刻意放在「保活」之后、「版本与更新」之前：它不是日常要用的功能，
+ * 但**出问题时要找得到** —— 而用户找它的场景就是「刚才打卡失败了」。
+ * 因此说明文案直接写出「日志里有什么」和「失败时发出来」，而不是只写四个字。
+ */
+private fun SignLogCard(onOpen: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("签到日志", fontWeight = FontWeight.Bold)
+            Text(
+                "每次扫码与签到都会自动记录：二维码原文、本应用发出的地址、学校回的正文。" +
+                    "打卡失败时把这份日志发出来，就不用靠回忆和截图去复原现场。",
+                fontSize = 12.sp,
+                color = Color(0xFF5B6B63),
+                lineHeight = 18.sp,
+            )
+            TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                Text("查看 / 分享日志")
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsScreen(
     state: AppUiState,
     vm: MainViewModel,
     onBack: () -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val activity = LocalContext.current as? ComponentActivity
     // 每次回到前台都重新核对保活状态，并借机重试一次守护服务（冷启动时可能被系统拒绝）。
@@ -1025,6 +1188,7 @@ private fun SettingsScreen(
         item { AutoSignCard(state, vm) }
         item { AutoSignExcludeCard(state, vm) }
         item { KeepAliveCard(state, vm) }
+        item { SignLogCard(onOpenLogs) }
         item { UpdateCard(state, vm) }
         item {
             val context = LocalContext.current

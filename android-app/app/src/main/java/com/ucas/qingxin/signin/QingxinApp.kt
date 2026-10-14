@@ -17,6 +17,7 @@ import com.ucas.qingxin.signin.course.CourseRepository
 import com.ucas.qingxin.signin.lecture.LectureNoticeService
 import com.ucas.qingxin.signin.lecture.LectureRepository
 import com.ucas.qingxin.signin.lecture.LectureScheduleStore
+import com.ucas.qingxin.signin.logging.SignLog
 import com.ucas.qingxin.signin.network.QingxinApiService
 import com.ucas.qingxin.signin.qr.QrTimelineManager
 import com.ucas.qingxin.signin.update.UpdateCheckStore
@@ -24,6 +25,7 @@ import com.ucas.qingxin.signin.update.UpdateService
 import com.ucas.qingxin.signin.widget.WidgetRefreshScheduler
 import com.ucas.qingxin.signin.widget.WidgetTicker
 import com.ucas.qingxin.signin.widget.WidgetUpdater
+import java.io.File
 
 /**
  * 依赖容器。
@@ -35,6 +37,14 @@ import com.ucas.qingxin.signin.widget.WidgetUpdater
  */
 class QingxinApp : Application() {
     lateinit var api: QingxinApiService
+
+    /**
+     * 扫码 / 签到的本地诊断日志（写在应用私有目录，只有用户主动分享才会离开设备）。
+     *
+     * 与 [api] 同级：它要在 [buildDependencies] 里先于 `api` 构造 ——
+     * API 层是唯一能看到学校响应正文的地方（见 `QingxinApiService.log`）。
+     */
+    lateinit var signLog: SignLog
         private set
     lateinit var credentialStore: SecureCredentialStore
         private set
@@ -177,7 +187,9 @@ class QingxinApp : Application() {
     )
 
     private fun buildDependencies() {
-        api = QingxinApiService()
+        // 诊断日志优先构造：它不依赖任何其他组件，而其余组件都要往里记东西。
+        signLog = SignLog(File(filesDir, "logs"))
+        api = QingxinApiService(log = signLog)
         credentialStore = SecureCredentialStore(this)
         authRepository = AuthRepository(api, credentialStore)
         courseRepository = CourseRepository(this, api, authRepository)

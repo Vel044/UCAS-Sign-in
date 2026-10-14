@@ -3,6 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+      扫码：只用于「手动打卡」页的扫码入口，运行时申请。
+      本应用**不申请任何定位权限** —— 签到走 stu_scan_sign 通道，不需要经纬度。
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 无后置摄像头的设备（模拟器 / 平板）仍可安装，扫码入口不可用，手工录入照常。 -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -205,5 +214,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="scheduled_auto_checkin_daemon" />
         </service>
+
+        <!--
+          日志分享：把 logs/ 里的日志文件以 content:// 交给用户选定的接收方。
+          exported="false" + 只放行 logs/ 一个目录（见 @xml/file_paths）：
+          日志里有二维码原文与学校响应正文，不能有第二个入口能读到它。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

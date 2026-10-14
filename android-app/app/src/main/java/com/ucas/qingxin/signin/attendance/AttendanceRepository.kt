@@ -42,6 +42,52 @@ class AttendanceRepository(
         performSign(course)
     }
 
+    /**
+     * 扫码签到：目标地址由 [ScanPayload] 与
+     * [QingxinApiService.buildScanUrl] 决定。
+     *
+     * 复用手动签到那把锁是**必需**的，不只是「讲礼貌」：
+     * [inFlightCourseId] 会让自动路径让路（见 [trySignOneClick]）。否则用户刚扫完码，
+     * 后台巡检又对同一节课发一发，学校会回「已签到」，
+     * 界面就会把刚刚的「签到成功」刷成失败 —— 用户看到的是功能坏了。
+     */
+    suspend fun signScanTarget(path: String, query: String): SignResult = signMutex.withLock {
+        performScanSign(path, query)
+    }
+
+    private suspend fun performScanSign(path: String, query: String): SignResult {
+        if (inFlightCourseId != null) {
+            throw ApiException("SIGN_IN_PROGRESS", "签到进行中，请勿重复点击")
+        }
+        // 扫码目标可能对应任何一节课（甚至课表里还没有的课），拿不到 Course 就也拿不到
+        // course.id。用一个**不可能等于任何真实 id** 的常量占位：
+        // uiStatus 是按 `inFlightCourseId == course.id` 比的，因此不会有任何课程被显示成
+        // 「签到中」；但 isSigningNow() 为真，自动路径会正确让路。
+        inFlightCourseId = SCAN_IN_FLIGHT
+        try {
+            var session = try {
+                auth.requireSession()
+            } catch (e: ApiException) {
+                if (e.code == "LOGIN_EXPIRED") {
+                    throw e
+                }
+                auth.refreshSession()
+            }
+            return try {
+                api.submitScanSign(session, path, query)
+            } catch (e: ApiException) {
+                if (e.code.startsWith("HTTP_") || e.message?.contains("登录") == true) {
+                    session = auth.refreshSession()
+                    api.submitScanSign(session, path, query)
+                } else {
+                    throw e
+                }
+            }
+        } finally {
+            inFlightCourseId = null
+        }
+    }
+
     /** 是否有签到请求正在飞行中（自动路径据此让路）。 */
     fun isSigningNow(): Boolean = inFlightCourseId != null
 
@@ -109,5 +155,15 @@ class AttendanceRepository(
         } finally {
             inFlightCourseId = null
         }
+    }
+
+    private companion object {
+        /**
+         * 扫码签到时的「飞行中」占位键。
+         *
+         * 刻意不是一个看起来像 id 的值：课程 id 是数字串、uuid 是 32 位十六进制，
+         * 双下划线开头的东西两样都撞不上，因此 [uiStatus] 绝不会把它算到某节课头上。
+         */
+        const val SCAN_IN_FLIGHT = "__scan__"
     }
 }

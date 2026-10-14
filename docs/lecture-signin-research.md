@@ -643,12 +643,364 @@ RSS 是最新在前，报道比预告新因而先出现、先被保留。**一�
 - **后台自动更新讲座时间表**：不可能 —— 它需要登录，而登录需要人。
   这一点是数据源的固有属性，不是实现偷懒。
 
+### 10.14 现场签到二维码的编码与通道：小程序解包确证（2026-10-13，1.3.0）
+
+**这解决的是 §11 里挂了最久的一条**：「现场二维码里到底编码了什么」。
+此前只能标注「未现场取证前不得假设」，而它直接决定扫码打卡能不能做、怎么做。
+
+#### 方法
+
+解包「轻新课堂」微信小程序 `wxdd3bd7d4acf54723`：`__APP__.wxapkg` 用 V1MMWX 方案解密
+（PBKDF2-SHA1(AppID, `saltiest`, 1000, 32) → AES-256-CBC(IV = `the iv: 16 bytes`) 解前 1024 字节
+→ 其余字节与 AppID 倒数第二字符的 ASCII 异或），得到 `app-service.js`，
+再逐字读取扫码入口的两处实现。
+
+#### 结论一：同一个扫码入口分流**四件事**，不是一件事
+
+`pages/ALightClassesPro/ALightClassesProIndex.js` 的 `cliclScanCode` 按**固定顺序**判断：
+
+| 序号 | 特征串 | 去向 | 是否签到 |
+| --- | --- | --- | --- |
+| 1 | `app/course/stu_scan_sign.action` | 现场签到（旧 iClass 通道） | ✅ |
+| 2 | `app/common/stuScanSign` | 现场签到（7.0 平台通道，读 `data.STATUS`） | ✅ |
+| 3 | `idesktop` | `navigateTo ScanCodeLoginView`（桌面端扫码登录） | ❌ |
+| 4 | `/schoolCourse/stuJoinCourse/` | 跳转加入课程页 | ❌ |
+| 5 | `app/course/saomadati.action` | 课堂答题（**该分支为空**，等于忽略） | ❌ |
+| 6 | 都不含 | `showToast("请提供有效的二维码！")` | ❌ |
+
+**顺序不可调换**：签到分支必须排在 3/4/5 之前。3/4/5 的特征串不会出现在签到码里，
+但只要有一个签到码的文本里恰好含 `idesktop`，把非签到分支判在前面就会把该签到的码判丢。
+
+→ 对实现的直接约束：**先分类，再决定发不发请求**。认成 3/4/5 时必须一个请求都不发。
+（本项目的实现：`attendance/ScanPayload.kt`。）
+
+#### 结论二：旧通道签到请求的确切形态
+
+`gotoSignWithUrl` 的实现是：
+
+```js
+t.requestPost(o + "&id=" + e.globalData.userInfo.uid, null, {})
+// 成功判据：顶层 o.STATUS == "0"，否则 toast o.ERRMSG
+```
+
+其中 `o` 由 `cliclScanCode` 这样拼出来：
+
+```js
+var a = "app/course/stu_scan_sign.action?",        // 注意：a 里含 "?"
+    n = a + t.split(a)[1],                          // 只取 "?" 之后的 query
+    l = o.data.schoolHttpsUrl + n                   // 拼回学校自己的域名
+```
+
+而 `requestPost` 的完整形态（逐字）：
+
+| 项 | 值 |
+| --- | --- |
+| 方法 | **POST** |
+| Content-Type | `application/x-www-form-urlencoded` |
+| 请求体 | 空（`data: {}` 序列化后为空串） |
+| 头部 | `sessionId`（= `userInfo.result.sessionId`）、`Cookie`（= `globalData.cookieToken`）、`Authorization`（= storage） |
+| 成功判据 | `STATUS == "0"` |
+
+**没有第二层签名、nonce、HMAC 或挑战应答** —— 这条链路可以把二维码里的参数原样重放。
+
+#### 结论三：域名取自**学校配置**，二维码里的域名被丢弃
+
+`schoolHttpsUrl = globalData.schoolInfo.coursePlatformHttpsUrl`。小程序把二维码里的
+`scheme://host/path` 整个丢掉，只保留 `?` 之后的 query。
+
+**同一件事在另一处入口用的是另一个域名**：`pages/.../scanBtnClick`（「我的」页）命中同一特征串后，
+拼的是 `globalData.schoolInfo.schoolServiceURL`，且请求体是 `{id, longitude, latitude}`
+（**带位置**，只是 `longitude` / `latitude` 取自它自己的定位，不是二维码里的）。
+
+→ 对本项目的意义：这两个 host 里，`schoolServiceURL + "app/"` 与本项目的
+`BASE_URL`（`.../app/`）**同源**，也与原版 RememberSignIn 的一致。
+而 `sessionId` 只由 `BASE_URL` 这台服务器签发 —— 因此**必须**把请求发回
+`BASE_URL`，否则认证必然失败，还等于把会话凭据送给二维码里随便写的域名。
+扫码页面上会明确提示「二维码指向 X，已改用本校通道 Y」，避免失败时无法归因。
+
+#### 结论四：**扫码通道不需要位置**，课表自动签到才需要
+
+同一份 `app-service.js` 里，课表自动签到（`COURSE_SIGN_IN` =
+`schoolServiceURL + "app/course/stu_auto_sign.action"`）的请求体是：
+
+```js
+{ id, courseSchedId, routerInfo, longitude, latitude, machineInfo }
+```
+
+`routerInfo` 是 **WiFi BSSID**，`longitude`/`latitude` 是 GPS。也就是说：
+
+| 通道 | 端点 | 要 GPS | 要 BSSID |
+| --- | --- | --- | --- |
+| 现场扫码 | `app/course/stu_scan_sign.action` | ❌ | ❌ |
+| 课表自动 | `app/course/stu_auto_sign.action` | ✅ | ✅ |
+
+→ 直接支撑了本项目的一条**隐私约束**：扫码打卡只申请相机权限，
+不因为扫码申请定位，也不伪造定位。
+
+#### 结论五：兜底形态（本项目唯一的额外宽容）
+
+若二维码既不含上面任何特征串，**整段原文恰好是** 7 位数字（`courseSchedId`）
+或 32 位十六进制（`timeTableId`），本项目按现场签到处理。
+小程序对这种码只会报「请提供有效的二维码」；但用户正站在班牌前面，
+且这条兜底同样先过格式校验（不合格仍是一个请求都不发），因此值得宽容。
+
+> 仍未确证：`app/common/stuScanSign`（7.0 平台）在本校**没有可验证环境**。
+> 本项目按「识别 + 与旧通道同形态提交」实现，真伪交由服务器回答；
+> 这一条**不计入**已确证结论。
+
+#### 对本轮实现的可核对清单
+
+- 载荷分类顺序与小程序逐条一致，且非签到类别不发请求 → `ScanPayload.kt` + `ScanPayloadTest.kt`
+- POST / 空表单体 / `sessionId` 头 / `id` 追加 → `QingxinApiService.submitScanSign`
+- 域名一律改回 `BASE_URL`，二维码域名只用于提示 → `QingxinApiService.buildScanUrl`
+- `timestamp` 沿用二维码原值，缺失才补校时 → `ScanPayload.DirectSign.withTimestamp`
+- 成功判据在扫码通道放开为只认 `STATUS == "0"` → `QingxinApiService.parseSignResult(json, requireStuSignStatus = false)`
+- 只申请相机，不申请定位 → `AndroidManifest.xml`（已用 `aapt2 dump permissions` 核对过产物）
+
+### 10.15 讲座与 `/schoolCourse/stuJoinCourse/`：否证，以及一条 `cId` 关联（2026-10-13）
+
+**问题**：讲座打卡是否使用 `/schoolCourse/stuJoinCourse/` 相关接口？
+
+**结论：否。**
+
+1. **这条路径不是接口，是 H5 前端路由。** 它在轻新课堂全包只出现 **2 次**，都在首页
+   `cliclScanCode` 的分流里，且**不产生任何后端请求**：拼出
+   `coursePlatformHttpsUrl + "/#/ALightClassesPro/teacher/createNewCourse/joinCourse?inviteCode=…"`
+   → `setStorageSync("joinCourseUrl")` → reLaunch 到 `ALightClassesProIndex`
+   → `setData({weburl})` 交给 `<web-view>` 加载。`/#/` 是前端哈希路由，
+   语义是**学生凭邀请码加入老师建的课**。
+
+2. **同名的 `stuJoinCourse` 是"动作名"，语义仍是加入课程。** 它作为 `method` 的值
+   POST 到 **veURL（资源 / 视频平台）** 的 servlet：
+   `veURL + back/course/courseInfo.shtml`，body
+   `{method:"stuJoinCourse", userId:<userUUID>, cId:<扫到的纯数字>}`，
+   成功判据 `STATUS=="0"`，文案「加入课程成功」。
+   触发点是**「我的」页**扫码遇到**纯数字**内容 —— 与签到是分开的两条分支。
+
+3. **轻新课堂没有学生讲座功能。** `讲座` / `听讲` / `学术` 在 456 个文件里 **0 命中**；
+   128 个 `.action` 端点里没有任何讲座端点。唯一带 "lecture" 的是
+   `veURL + back/tqa/listeningToLectures.shtml` 及其
+   `getMyListenTimeTableList` / `queryMyListenTimeTableList`，但同模块里全是
+   `evalScore` / `ruleId` / `queryCompositeScoreList` / `queryTeacherEvalState`，
+   全包中文计数为「评教」30 /「督导」4 /「听课」3 /「听讲」0 ——
+   那是**督导听课评教**，不是学生听讲座。
+
+4. **本机 48 个 wxapkg 全量扫描**：`schoolCourse` / `stuJoinCourse` / `stu_scan_sign`
+   **只出现在轻新课堂（`wxdd3bd7d4acf54723`）**，其它小程序 0 命中；
+   也没有任何小程序含「讲座」。即：没有任何一个入口用这条路径承载讲座。
+
+5. **顺带否证 §11 的一条**：`/subject/toSign`、`/subject/`、`lectureId` 在轻新课堂里
+   **0 命中**；`toSign` 的 2 次出现都只是 `gotoSignWithUrl` 这个**函数名**的一部分。
+
+#### 由此得到一条对「讲座能否签到」有用的推论
+
+讲座在 iClass 侧**就是一个课程**（课程注册表里明德讲堂 `M1167` 占
+`cId 64241 / 64242 / 64243`）。而轻新课堂的签到**全部是课程维度**的 ——
+`stu_scan_sign.action`（学生扫码）、`stu_auto_sign.action`（学生课表自动）、
+`grant_sign.action`（教师发起）、`teacher_roll_call.action`（点名）、
+`get_course_sign_info.action`（签到信息）、`get_my_course_sign_detail.action`（我的签到明细）、
+`signcount/get_course_attendance.htm`（考勤统计）—— **没有任何讲座维度的签到端点**。
+
+→ **讲座若要能签，走的也是 `stu_scan_sign.action`（本项目已实现的那条），而不是 `stuJoinCourse`。**
+缺的从来不是「端点」，而是 §11 里 `cId ↔ 7 位 courseSchedId` 的那条映射。
+
+#### 一条需要记账的碰撞风险（当前不触发）
+
+轻新课堂对**纯数字**二维码的处理在两个入口**不一致**：首页扫码判为
+「请提供有效的二维码！」，「我的」页扫码判为**加入课程邀请码**（`cId`）。
+
+本项目自 1.3.0 起把**恰好 7 位**的纯数字二维码退化处理为现场签到（`courseSchedId`）。
+实测 `cId` 现为 **5 位**（`64241`、`57000+`、`6960–6962`），离 7 位尚远，
+**当前不会碰撞**；但这是**本项目独有的宽容**（小程序不这么做），
+若将来注册表 `cId` 涨到 7 位，同一个二维码会被两边解释成不同的东西。
+届时判据应回到「是否含 `app/course/stu_scan_sign.action`」，而不是纯数字。
+
+### 10.16 讲座班牌真机失败与「讲座不挂课表」这一条（2026-10-13，1.3.2）
+
+#### 现场观测
+
+真机扫讲座班牌（二维码指向 `124.16.75.106`，已按小程序行为改发本校通道）得到：
+
+| 界面 | 内容 |
+| --- | --- |
+| 识别 | 已识别：**32 位二维码标识** |
+| 结果 | 没能完成签到 —— **学校提示签到码已失效，请刷新后重试** |
+| 域名提示 | 二维码指向 `124.16.75.106`，已按轻新课堂的行为改用本校通道 |
+
+要点：学校给的是**语义化拒绝**（`(二维码|签到码).*(失效|过期)` 命中），
+不是参数错、不是认证失败 —— 说明**通道方向对**：讲座确实走
+`stu_scan_sign.action` 这条课程维度的签到通道，与 §10.14 的结论一致。
+
+#### 用户给出的决定性约束
+
+> 讲座签到是以一种**课程**的形式用二维码 / 班牌签到的，但**讲座课程不挂在学生的课程内**。
+
+这一条把问题一分为二，两半的答案**不同**：
+
+**（一）扫码签到 —— 有解，且不需要讲座进课表。**
+班牌二维码**自己带着**这次签到的标识，扫码通道的本质是把它**原样重放**给
+`stu_scan_sign.action`；服务器按「标识 + 新鲜度 + 本人身份」判，**学生是否在册由它决定**，
+与我们本地有没有这份课表**无关**。因此「不挂课表」不构成障碍。
+
+**（二）自动签到 —— 无解（在现有接口下）。**
+自动签到必须先从**课表**里读到标识；讲座不在课表里，而全包 128 个 `.action`
+端点中**没有任何一个能枚举「未选课程 / 讲座」的节次**（§10.15 第 3 条）。
+所以 §11 那条 `cId ↔ courseSchedId` 的 bridge 仍然是唯一未决点，
+且它**只挡自动签到，不挡扫码**。
+
+#### 本轮定位到的**自有偏差**（1.3.2 修掉）
+
+对比小程序与本项目在扫码通道上**实际发出的请求**：
+
+| 步骤 | 轻新课堂 | 本项目（1.3.1） |
+| --- | --- | --- |
+| query | 二维码原样 | 二维码原样 ✅ |
+| 身份 | `&id=<uid>` | `&id=<uid>` ✅ |
+| 时间戳 | **从不新增** | **缺则自补一个本校校时** ❌ |
+| 形态 | POST 空表单体 | POST 空表单体 ✅ |
+
+也就是说，凡是二维码**自己没带** `timestamp` 的班牌，我们都会额外塞一个值进去 ——
+而这是**本项目独有的**改动，唯一已知可用的客户端（小程序）不这么做。
+学校的「签到码已失效」既可能真是码轮换过期，也可能正是被这个多出来的值判掉的；
+在拿到反证之前，不应偏离参照物。
+
+**修法**：[`ScanPayload.DirectSign.needsTimestamp`] 的判据从
+「query 里没有 `timestamp`」改为「**请求不是原样重放**」——
+即只有整段原文只是一个**裸编号**（没有 query 可重放、请求必须由我们拼完整）时才补校时；
+二维码自带 query 时**一律照抄，不增不删**。
+（见 `ScanPayload.DirectSign.needsTimestamp` 与 `ScanPayloadTest` 的三条契约测试。）
+
+#### 一条仍然开放的假设
+
+若「不补时间戳」之后**依旧**是「已失效」，那么问题不在时间戳，而在**标识本身** ——
+即班牌那个 32 位值并不是 `stu_scan_sign.action` 认的节次标识。
+这一条**离线无法分辨**（我们手上没有一张讲座班牌的原文）。
+
+#### 因此本轮同时加了「现场诊断」
+
+结果卡片现在直接摊开两行，等宽、可长按复制：
+
+- **二维码原文** —— 学校发出来的东西，一个字符都没改；
+- **本次提交** —— 我们发出去的东西（`id` 只写参数名，不写本人编号）。
+
+再配一句 `timestamp` 来源说明。这两行是**唯一**能在不抓包的前提下判定
+「是标识不对，还是我们多加了参数」的证据。下一次扫讲座班牌时，
+把这两行贴出来即可收敛到结论。
+
+> 顺带一个对现场操作有影响的实测事实：学校的签到码是**短命**的 ——
+> 原版实现里二维码刷新上限就是 **5 秒**（[`QingxinApiService.QR_REFRESH_CAP_MS`]，
+> 由原版反编译确认）。所以失败提示里现在补了一句
+> 「班牌的签到码大约每 5 秒轮换一次，请对准最新一屏立刻重扫」——
+> 学校那句「请刷新后重试」对学生等于没说。
+
+### 10.17 `inv` 方向：能不能拿 32 位标识反查讲座节次？（2026-10-13）
+
+**结论：`stu_auto_sign.action` 与 `get_stu_course_sched.action` 都不行；但它们引出了
+一个此前**从未探测过**的第二个后端。**
+
+#### 一、`stu_auto_sign.action` —— 排除
+
+小程序里它的常量名就叫 `COURSE_SIGN_IN`：
+
+```js
+COURSE_SIGN_IN: function(){ return schoolServiceURL + "app/course/stu_auto_sign.action" }
+
+function L(i, s, n, c, l, o, r) {
+  var g = { id: i, courseSchedId: s, routerInfo: n, longitude: c, latitude: l, machineInfo: o };
+  requestPost(COURSE_SIGN_IN(), null, g)   // 成功判据 STATUS == "0"
+}
+```
+
+两处**硬性**限制，恰好都打在讲座上：
+
+| 它要什么 | 讲座的情形 |
+| --- | --- |
+| `courseSchedId`（**7 位**，没有 `timeTableId` 分支） | 讲座恰恰拿不到 7 位标识 —— 这正是要找的东西 |
+| `routerInfo`（BSSID）+ `longitude` + `latitude` | 需要定位权限与真实 WiFi，本项目的扫码路线刻意不申请定位 |
+
+→ **`stu_auto_sign.action` 不是「反查」入口，而是「已知 7 位标识之后」的提交入口。**
+把 32 位标识喂给它没有意义：它的契约里根本没有这个字段。
+
+#### 二、`get_stu_course_sched.action` —— 排除
+
+```js
+GET_TIMETABLE_BY_DAY: function(e){
+  return 1 == e ? schoolServiceURL + "app/course/get_stu_course_sched.action"   // 学生
+                : 2 == e ? schoolServiceURL + "app/course/get_teacher_course_sched.action" : undefined
+}
+```
+
+它是**本人课表的日视图** —— 也就是本项目**已经在用**的那条通道
+（`CourseRepository` / 一键签到的二维码来源）。讲座不在这份课表里，
+再问它一次只会得到同一个「不在」。**它没有「查别的课程」的能力。**
+
+#### 三、真正的发现：小程序有一个**第二个后端**
+
+追 `url_autoStuSignGetStuCourseSched` 的基址函数，牵出这一段：
+
+```js
+function e() {
+  var s = (getApp().globalData.schoolInfo) || {};
+  return s.coursePlatformHttpsUrl && s.coursePlatformHttpsUrl.length > 0
+       ? s.coursePlatformHttpsUrl
+       : (s.coursePlatformUrl || "");
+}
+module.exports = {
+  url_scanCodeLogin:    function(){ return s.schoolServiceURL + "app/common/user_login_qxkt_qr_code.action" },
+  url_scanCodeLoginNew: function(){ return e() + "esp/app/common/userLoginQxktQrCode" },
+  NEWLOGIN:             function(){ return e() + "esp/auth/signIn" },
+  GETTokenCaptchaImage: function(){ return e() + "esp/auth/captchaImage" },
+  AUTH_LOGIN_CODE:      function(){ return e() + "esp/auth/loginCode" },
+  url_autoStuSignGetStuCourseSched: function(){ return e() + "esp/autoStuSign/getStuCourseSched" },
+};
+```
+
+**`e()` 就是 `coursePlatformHttpsUrl`** —— 同一个值在 `ALightClassesProIndex.onLoad` 里被赋给
+`this.data.schoolHttpsUrl`，也就是**那些 `/#/ALightClassesPro/…` 的 H5 路由所在的主机**。
+
+由此得到三条对后续有约束力的结论：
+
+1. **存在两套后端。** 本项目至今只碰过**一套**：`schoolServiceURL`
+   （iClass，`app/…` 的 `.action` 端点，用 `sessionId` 头鉴权）。
+   另一套是**课程平台**（`/esp/…` 端点 + H5 路由，另一套登录与凭据），
+   **我们一个都没探过** —— 它甚至不在我们的配置里。
+2. **`esp/autoStuSign/getStuCourseSched` 是本轮唯一有希望的那个入口。**
+   小程序在 H5 课程平台加载完成后立刻 `requestGet(该地址, "", {})` ——
+   **无参数 GET**，语义就是「把可自动签到的课表给我」。
+   如果它会返回讲座条目（带 7 位标识），那么 §11 那条 bridge 就**存在**。
+3. **它大概率要课程平台的登录态，而不是我们的 `sessionId`。**
+   调用时机是 H5 登录完成之后（`bindloadClick`），因此不能假设现有凭据够用。
+   这一点决定了探测的代价：要么复用 §10.13 的内嵌 WebView 登录，要么从
+   `ALightClassesPro` 的登录流程里取凭据。
+
+#### 四、还有一个可能拿到主机名的公开入口
+
+同一批常量里，学校列表挂在**厂商**域名上而不是校内：
+
+```js
+GETUserOpenIdData:   "https://app.qxketang.com:4433/app/common/get_user_open_id.do"
+GETHttpsSchoolList:  "https://app.qxketang.com:4433/app/common/school_all_encryption_list.action"
+```
+
+`school_all_encryption_list` / `school_encryption_list` / `get_school_by_enterprise_wechat_id`
+这三个是**未登录**的学校目录 —— 理论上可以从里面拿到本校的 `coursePlatformHttpsUrl`，
+从而**不必**再去逆向 H5 登录流程就能确定该探哪个主机。
+
+> **本轮没有发这个请求。** 它是**厂商**（`app.qxketang.com`）而非校内主机，
+> 超出了本项目「只读探测学校自有系统」的既有边界，属于需要单独决定的事。
+> 记录在此，作为 `inv` 方向的第一步。
+
 ## 11. 待核实
 
 - **`cId` ↔ 7 位 `courseSchedId` 的映射**（**本轮最高优先级**）：注册表侧已确认无 7 位 / 32 位标识，故只能看移动端课表通道（探针 A1/A2/B1/C1，需登录）。**这是决定「讲座能否一键签到」的唯一未决点。**
+  **补记（§10.16，2026-10-13）**：该 bridge **只挡「自动 / 一键」签到，不挡「扫码」签到** —— 班牌二维码自带标识，扫码通道是纯重放，与本地课表无关。因此「讲座不挂课表」不影响扫码这条路。
 - **注册表 `cId` 与移动端 `courseId` / `courseNum` 是否同一体系**：若移动端课程层编号恰好等于注册表 `cId`，则 bridge 成立（探针 B1 即为此设计）；目前**无任何离线证据**（App 单测里的 `courseId` 是合成值）。
-- **现场二维码里到底编码了什么**：可能是 `cId`、复合码、`courseSchedId` 或一次性 token。未现场取证前不得假设。**若它编码的是 `cId`，则签到链路与现有 `stu_scan_sign.action` 不同，需要另一条通道。**
-- **`/subject/toSign` + `lectureId`**：本仓库与现有留档中**未找到**实际调用样例（仅作为外部传言存在）。要用它必须先拿到可验证的抓包或源码证据；即便证实，也只是报名接口。
+- ~~**现场二维码里到底编码了什么**~~ → **已由 §10.14 收敛（2026-10-13）**。二维码里可能是
+  「旧 iClass 签到路径 + query」「7.0 平台签到路径」「桌面登录」「加入课程」「课堂答题」
+  五类之一，本项目已按小程序的分流顺序逐条对应实现。此前担心的「若它编码的是 `cId`，
+  则签到链路与现有 `stu_scan_sign.action` 不同」**未成立**：扫码通道就是把 query 原样重放。
+  仍未确证的是 7.0 平台通道（`app/common/stuScanSign`）在本校的可用性 —— 无可验证环境。
+- **`/subject/toSign` + `lectureId`**：本仓库与现有留档中**未找到**实际调用样例（仅作为外部传言存在）。要用它必须先拿到可验证的抓包或源码证据；即便证实，也只是报名接口。**§10.15（2026-10-13）已在轻新课堂内否证其存在**：`/subject/toSign`、`/subject/`、`lectureId` 均 0 命中，`toSign` 的两次出现只是函数名 `gotoSignWithUrl` 的片段。此条**可从待核实清单移除**，仅保留「外部传言、无证据」的定性。
 - **一期讲座对应几条 `subject`**：**已由本轮实测收敛** —— `M1118` 为 `6960/6961/6962` 三个连号 `subject`（三校区各一），与 iClass 注册表「一场 = 3 个连号 `cId`」**结构一致**。此前观察到的 2 / 3 / 5 条情形应是**改期 / 加场**造成的额外条目（注册表侧同样有 `M1165`/`M1166` 雁栖湖重复条目）。仍不建议写成「恒定 3 条」，但**默认值取 3** 是有实测支撑的。
 - **讲座能否拿到 32 位 `timeTableId`**：`timeTableId` 变体本身已在客户端代码中确认，但它是否可能出现在讲座类条目上，尚未验证。
 - **xkcts 是否有未被开源实现覆盖的隐藏签到接口**：无法证伪，只能标注为「在已核实范围内不存在」。
@@ -662,3 +1014,26 @@ RSS 是最新在前，报道比预告新因而先出现、先被保留。**一�
 - **探针的 B6 / B7（本轮新增）**：`tools/README.md` 的「探测项一览」与「找『下一场』」两节；源码在本机 `tools/src/probe.py`（已 gitignore），仓库内只提交不含端点字面量的 `tools/iclass_probe.pyz`。
 - **feed ↔ 注册表 join 与节奏分析（本轮新增）**：`tools/out/_rhythm.py`（本机离线脚本）输出的形态/节奏统计；`tools/out/_gapscan.py` 补扫的 `cId` 57000–57155（找回 `M1118`–`M1120`）。两份公开快照的 `title` 与注册表课程名命中 114/114 与 341/345，是本轮 join 的基础。
 - 签到链路与本项目约束：`android-app/.../lecture/LectureModels.kt`（`LectureSource`、`signable` 门控）、`android-app/.../network/QingxinApiService.kt`（`stu_scan_sign.action`、7 位 / 32 位判定、`get_timestamp` 校时）、`android-app/.../attendance/LectureAutoSignBridge.kt`（默认关闭）、`tools/README.md`（讲座是否进课表的探针问题定义）。
+- **小程序解包（本轮新增，§10.14 的全部依据）**：本机微信目录下的
+  `applet/packages/wxdd3bd7d4acf54723/64/__APP__.wxapkg`（**不入库**，含用户态数据）。
+  解密后取 `app-service.js`；本节引用的实现都出自
+  `pages/ALightClassesPro/ALightClassesProIndex.js` 的 `cliclScanCode` / `gotoSignWithUrl` /
+  `gotoNewSignWithUrl`、`pages/.../scanBtnClick`、以及 `app-service.js` 顶层的 URL 常量表
+  （`COURSE_SIGN_IN`）与 `requestPost` 定义。
+  仓库内**不复现**任何小程序代码或密钥，只记录结论。
+- **全包枚举与横向扫描（§10.15 的全部依据，2026-10-13）**：同一 `wxapkg` 解出的
+  **456 个文件**（落在本机临时目录，**不入库**）与其中 `app-service.js` 的
+  **128 个 `.action` 端点全清单**、24 条 `*_URL` 常量、39 个 `method:"…"` servlet 动作名；
+  以及**本机 48 个 `wxapkg` 的横向扫描**（覆盖 20 个小程序 appid）——
+  用于证明 `schoolCourse` / `stuJoinCourse` / `stu_scan_sign` 只存在于轻新课堂。
+  仓库内不提交小程序正文，只记录结论与计数。
+- **讲座班牌真机实测（§10.16 的全部依据，2026-10-13）**：一次现场扫码的界面回显
+  （识别为 32 位标识、学校回「签到码已失效」、二维码指向 `124.16.75.106`）与
+  用户的定性说明「讲座签到是课程形式的班牌，但讲座课程不挂在学生课表内」。
+  **未留存二维码原文** —— 这正是 1.3.2 把「二维码原文 / 本次提交」摊到结果卡片上、
+  并把每次扫码与签到写进「签到日志」的原因（`android-app/.../logging/SignLog.kt`）。
+- **第二个后端的发现（§10.17 的全部依据，2026-10-13）**：仍出自同一份
+  `app-service.js` 的两个模块 —— 端点常量模块（`COURSE_SIGN_IN`、`GET_TIMETABLE_BY_DAY`、
+  `url_autoStuSignGetStuCourseSched`）与它的基址函数 `e()`（取
+  `schoolInfo.coursePlatformHttpsUrl`，兜底 `coursePlatformUrl`）。
+  **未发起任何请求**；`app.qxketang.com:4433` 的学校目录入口只记录、未访问。
