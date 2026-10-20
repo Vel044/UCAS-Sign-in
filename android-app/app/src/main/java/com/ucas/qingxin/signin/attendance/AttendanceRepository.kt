@@ -119,6 +119,31 @@ class AttendanceRepository(
         }
     }
 
+    /**
+     * 记录里那行「说明」：我们的判定 + **学校的原话**。
+     *
+     * ## 为什么原话必须进记录（2026-10-19 补记）
+     * 现场失败时用户唯一会分享出来的东西就是这份记录，而在此之前它只写我们
+     * 转述过的那句「请确认上课时间和课程状态」—— 那是**我们自己编的**，
+     * 学校的真实措辞（以及 `STATUS` / `ERRCODE`）全被丢掉了。
+     * 结果就是：拿到记录也只能猜学校在拒绝什么。
+     *
+     * 单行输出（用 `；` 连接）：记录文件是「一行一条」的，
+     * 换行会被 [SignRecordStore.escape] 转义成字面 `\n`，反而更难读。
+     */
+    private fun recordedMessage(result: SignResult): String {
+        val base = result.message.ifBlank { OUTCOME_FALLBACK[result.outcome] ?: "" }
+        // 成功不附：学校的「签到成功」对我们没有增量信息。
+        if (result.outcome == SignOutcome.SIGNED) return base
+        val voice = result.schoolMessage
+        if (voice.isBlank() || base.contains(voice)) return base
+        val codes = listOfNotNull(
+            result.status.takeIf { it.isNotBlank() }?.let { "STATUS=$it" },
+            result.errCode.takeIf { it.isNotBlank() }?.let { "ERRCODE=$it" },
+        ).joinToString("，")
+        return if (codes.isEmpty()) "$base；学校原话：$voice" else "$base；学校原话：$voice（$codes）"
+    }
+
     /** 是否有签到请求正在飞行中（自动路径据此让路）。 */
     fun isSigningNow(): Boolean = inFlightCourseId != null
 
@@ -151,7 +176,7 @@ class AttendanceRepository(
                     code = code,
                     kind = kind,
                     ok = result.outcome == SignOutcome.SIGNED,
-                    message = result.message.ifBlank { OUTCOME_FALLBACK[result.outcome] ?: "" },
+                    message = recordedMessage(result),
                     raw = raw,
                     outcome = result.outcome.name,
                     note = note,

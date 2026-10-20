@@ -47,6 +47,18 @@ data class SignResult(
     val status: String,
     val errCode: String,
     val stuSignId: String,
+    /**
+     * 学校回给我们的**原始**提示（未经过 [message] 那层人话改写），可为空串。
+     *
+     * ## 为什么必须单独留一份（2026-10-19 补记）
+     * 学校的拒绝理由短而含糊，而我们的 [message] 会把 `OUTSIDE_SIGN_WINDOW` 这一整桶
+     * 都写成「请确认上课时间和课程状态」—— 这句话是我们自己编的，**学校的原话被丢掉了**。
+     * 第一份「扫码仍不成功」的现场记录（`docs/sign-records.txt`）因此只剩我们那句泛泛的
+     * 转述，无从判断学校到底在拒绝什么（是码不对、是窗口没开、还是没有这门课）。
+     *
+     * 留着它，现场失败才能被**离线**读懂；它不含身份信息，可以安全地进记录与分享。
+     */
+    val schoolMessage: String = "",
 )
 
 enum class AttendanceUiStatus {

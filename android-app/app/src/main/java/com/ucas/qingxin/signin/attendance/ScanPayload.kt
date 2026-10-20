@@ -60,7 +60,7 @@ sealed interface ScanPayload {
         /** 相对 [com.ucas.qingxin.signin.network.QingxinApiService.BASE_URL] 的接口路径。 */
         val path: String
 
-        /** 提交时附带的 query（**不含**用户身份 `id`，那个由 API 层统一追加）。 */
+        /** 提交时附带的 query（**不含**用户身份 `id`，那个由 API 层放进表单体）。 */
         val query: String
 
         /** 二维码里写的域名，仅用于向用户提示；不会拿它发请求（理由见 [DirectSign.qrHost]）。 */
@@ -316,7 +316,7 @@ enum class NotSignKind(val label: String, val hint: String) {
  * 那会把一个只差一个参数、本来还能签的请求直接判死。按 `&` / `=` 两段拆
  * 反而更稳：解析不了的片段原样留着，不影响我们替换自己认得的那几个键。
  */
-private object ScanQuery {
+internal object ScanQuery {
     /** 取同名参数的值；缺失或为空串都算「没有」。 */
     fun param(query: String, name: String): String? = query.split('&')
         .asSequence()
@@ -333,4 +333,11 @@ private object ScanQuery {
         }
         return (kept + "$name=$value").joinToString("&")
     }
+
+    /** 删掉同名参数；其余片段（含我们看不懂的）原样保留，理由同本对象开头。 */
+    fun remove(query: String, name: String): String = query.split('&')
+        .filter {
+            it.isNotBlank() && !it.substringBefore('=').trim().equals(name, ignoreCase = true)
+        }
+        .joinToString("&")
 }

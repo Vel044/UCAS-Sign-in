@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ucas.qingxin.signin.QingxinApp
+import com.ucas.qingxin.signin.attendance.ScanIdMapping
 import com.ucas.qingxin.signin.attendance.SignCode
 import com.ucas.qingxin.signin.data.Course
 import com.ucas.qingxin.signin.data.SignOutcome
@@ -78,6 +79,18 @@ class ManualSignViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { ManualSignUiState() }
     }
 
+    /**
+     * 32 位标识 → 本机课表里**同一节课**的 7 位节次号（找不到为 `null`）。
+     *
+     * 与扫码通道共用 [ScanIdMapping] 的判定：只认 `uuid` 逐字相等，
+     * 不做任何启发式猜测 —— 猜错就是把别的课签掉。
+     */
+    private fun resolveSchedId(timeTableId: String): String? {
+        if (timeTableId.isEmpty()) return null
+        val courses = app.courseRepository.courses.value?.courses ?: return null
+        return ScanIdMapping.resolveSchedId(timeTableId, courses.map { it.uuid to it.id })
+    }
+
     /** 提交签到。 */
     fun sign() {
         val code = SignCode.parse(_ui.value.input)
@@ -96,7 +109,10 @@ class ManualSignViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.update { it.copy(signing = true, error = "", success = "") }
             val course = Course(
-                id = code.courseSchedId,
+                // 32 位标识在接口那边可能查不到可签节次（见 ScanIdMapping）：
+                // 本机课表能证明是同一节课时，改用它的 7 位节次号提交 —— 那是有大量
+                // 真实成功流量验证过的形态。证明不了就仍按原标识发。
+                id = code.courseSchedId.ifEmpty { resolveSchedId(code.timeTableId).orEmpty() },
                 uuid = code.timeTableId,
                 // 手动录入没有名称与时间可言：这些字段只用于展示，
                 // 而本条记录不会进入任何列表，因此留空即可。

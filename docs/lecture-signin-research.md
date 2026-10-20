@@ -1288,6 +1288,174 @@ MultiFormatOneDReader（Code128/39/93、ITF、Codabar、EAN/UPC、RSS 全家桶�
 - 附带：若出现「已放宽到全部码制」，说明这块班牌上的码**不是二维码**（或前 1 秒没对准）——
   这是此前完全没有的一条信息。
 
+### 10.21 时间戳修好之后仍失败：问题不在参数形态，在**标识形态**（2026-10-19，1.3.6）
+
+第二份现场记录（11 条：成功 6 / 失败 5）带来一个**全新的失败面**，而且它与 10.14 那次
+恰好构成一组对照实验 —— 同一部手机、同一块班牌、同一场课，**相隔 7 秒**：
+
+| 时刻 | 动作 | 提交的标识 | 结果 |
+| --- | --- | --- | --- |
+| 18:22:47 | 扫码 | `timeTableId=2025CF66…CB48`（32 位） | `OUTSIDE_SIGN_WINDOW` |
+| 18:22:50 | 扫码 | `timeTableId=2025CF66…CB48`（32 位） | `OUTSIDE_SIGN_WINDOW` |
+| **18:22:57** | **一键签到** | **`courseSchedId=1241918`（7 位）** | **成功** |
+
+先确认 §10.19 的修复**确实生效了**：两次扫码的 `timestamp` 都是
+「取自二维码（距本校校时 1 秒 / 4 秒），原样重放」—— 也就是说 1.3.4 的班牌时间戳策略
+已经把请求送过了**新鲜度**那道门（10.14 那次是 224 秒、卡在这一道上）。
+失败点因此**后移了一层**：码是新的，学校仍说「请确认上课时间和课程状态」。
+
+#### 一、四条排除性结论（都是可复核的实测，不是推断）
+
+用项目自己的后端（`BASE_URL`，`:8181`）与二维码自带的那个主机（`:8081`）对照探测，
+`id=0`（不触碰任何真实学号）：
+
+| 提交 | `:8181`（本项目 BASE_URL） | `:8081`（二维码自带） |
+| --- | --- | --- |
+| `timeTableId=<32 位>&timestamp&id=0` | `ERRCODE=100 用户不存在!` | 同 |
+| `courseSchedId=<7 位>&timestamp&id=0` | `ERRCODE=100 用户不存在!` | 同 |
+| **完全不带 id 参数** | **`ERRCODE=100 请使用轻新课堂扫码签到！`** | 同 |
+| `common/get_timestamp.do?id=0` | `STATUS=0` + 时间戳 | 同（**同一秒**） |
+| GET 与 POST 空表单体 | 无差别 | 无差别 |
+
+由此**同时否证**了三条此前最像的解释：
+
+1. **不是参数名写错**。只在不带任何 id 时服务端才回「请使用轻新课堂扫码签到！」，
+   说明 `timeTableId` 与 `courseSchedId` **都能过参数门**。
+2. **不是打错主机**。`:8181` 与 `:8081` 的响应逐字相同，校时还落在同一秒 ——
+   它们是同一个后端（或同一份库），「二维码指向另一套系统」不成立。
+   （顺带修正 §10.16 的一条留档：`:8081` 当时记为「不可达」，现在是可达的。）
+3. **不是方法与请求体**。GET 与「POST + 空表单体」在这一层完全等价，
+   而后者本来就是照抄小程序的 `requestPost(o, null, {})`。
+
+#### 二、剩下的解释：标识形态
+
+`stu_scan_sign.action` 的参数门之后，服务端要按标识去**找一节可签的节次**。
+项目里 6 次成功**全部**是 7 位节次号，4 次失败**全部**是 32 位标识 —— 这个分布
+（而不是任何单条日志）是最强的线索：32 位 `timeTableId` 满足了「带 id」这一道，
+却没能落到一节**可签的节次**上。
+
+需要如实说明的是：这一条**尚未被直接证实**。要证实它，需要在**已登录**的会话下
+对比同一个 `timeTableId` 与它对应节的 7 位号 —— 而这两次现场记录里，学校那句原话
+被 1.3.5 之前的记账逻辑**丢掉了**（`OUTSIDE_SIGN_WINDOW` 这一桶统一写成我们自编的
+「请确认上课时间和课程状态」）。这是 1.3.6 先修诊断的原因（见下）。
+
+#### 三、1.3.6 的两件事
+
+**(1) 补入 7 位节次号（`attendance/ScanIdMapping.kt`）。**
+二维码只给 32 位标识、而**本机课表能证明是同一节课**（`Course.uuid` 与二维码标识
+逐字相等）时，把该课的 7 位 `courseSchedId` **补进 query**再提交：
+
+- **补而不换**：`timeTableId` 原样留着。服务端按哪个参数查由它决定，两个都在场时
+  两种查法都能命中 —— 不必赌它的实现。
+- **放在最前**：若服务端是「取 query 里第一个 id 参数」，放在最前才让**已验证可用**的
+  7 位节次号被选中（`getParameter` 与顺序无关时也无害）。
+- **证明不了就一个字节都不改**，仍是原来的原样重放；记录里会写明
+  「今天课表里找不到对应节次，只能原样重放」—— 这句话正是下次现场归因的分岔点。
+- 手动录入 32 位标识走同一条映射（`ui/ManualSignViewModel.kt`）。
+
+**(2) 不再吞掉学校的原话（`SignResult.schoolMessage`）。**
+此前 `OUTSIDE_SIGN_WINDOW` 会把学校的具体措辞替换成我们自编的一句话，
+于是**唯一会被人分享出来的东西**（签到记录）里没有任何能归因的信息。1.3.6 起：
+
+- 失败记录写成「说明：…；学校原话：…（STATUS=…，ERRCODE=…）」；
+- 结果卡片与签到日志同样分开记「我们的判定」与「学校原话」。
+
+#### 四、下一份记录能收口什么
+
+再扫一次同一块班牌，记录里会出现三种「参数来源」之一，各自指向明确：
+
+| 记录里出现 | 含义 | 下一步 |
+| --- | --- | --- |
+| 「已按今天课表补入 7 位节次号 … 一并提交」 | 映射成立，且请求已同时带两种标识 | 成功即收口；若仍失败，看学校原话 |
+| 「今天课表里找不到对应节次」 | 那张码的标识**不在本人课表内**（讲座 / 别的课） | 该查「这块班牌到底属于哪门课」，而非继续改参数 |
+| 「二维码自带的时间戳已过去 … 已改用本校校时」 | 码又陈旧了，回到 §10.19 的班牌刷新问题 | 班牌没在刷新 |
+
+### 10.22 请求形态才是根因：小程序有三个扫码入口，本项目复刻了本校**不可达**的那一个（2026-10-20，1.3.6）
+
+**输入**：轻新课堂小程序**当前版本**的包（v65，appid `wxdd3bd7d4acf54723`）。
+§10.14 解的是当时的 `__APP__.wxapkg`；本轮从本机微信 4.x 数据目录
+（`…/xwechat/radium/users/<hash>/applet/packages/wxdd3bd7d4acf54723/65/`）重新解出最新包，
+逐字重读全部扫码入口。解包脚本 `tools/src/wxapk_unpack.py`（不入库），产物在系统临时目录。
+
+#### 一、三个扫码入口，两种请求形态
+
+| 入口 | 提交形态 | 在本校 |
+| --- | --- | --- |
+| 首页 `cliclScanCode` → `gotoSignWithUrl` | `coursePlatformHttpsUrl + <query> + "&id=" + uid`，POST **空表单体** | **不可达**（见下） |
+| `pages/ALightClassesPro/OpenScanQRcode` | query 存 `scanCodeResult`，由 H5 课程平台页消费 | **不可达**（消费方进不去） |
+| **「我的」页 `mine.js` `scanBtnClick`** | `schoolServiceURL + "app/course/stu_scan_sign.action?" + <query 原样>`，`requestPost` POST **表单体 `{id, longitude, latitude}`** | **唯一可达** |
+
+**首页入口为什么不可达**：`ALightClassesProIndex.onLoad` 开头就是——
+
+```js
+this.data.schoolHttpsUrl = schoolInfo.coursePlatformHttpsUrl;
+if (空) schoolHttpsUrl = schoolInfo.coursePlatformUrl || "";
+if (仍空) return wx.reLaunch({ url: "/pages/init/login/login" });   // ← 本校落在这里
+```
+
+而本校 `coursePlatformHttpsUrl` / `coursePlatformUrl` **均为空**（§10.18：解密出整块
+PKCS7 填充 = 空串；`ifCoursePlatform = 0`）。也就是说：**§10.14 逐字复刻的那条
+「query + `&id=`、空表单体」链路，在本校从未被任何可用客户端发出过**——
+它在小程序里就只是一个走不到的分支。这修正了 §10.14 结论三的隐含假设：
+「`cliclScanCode` 拼的是 `schoolHttpsUrl`」属实，但该页面对空平台配置**有守卫**，
+本校用户根本进不了那个页面。
+
+#### 二、「我的」页的逐字链路（1.3.6 对齐的对象）
+
+```js
+// mine.js scanBtnClick —— 命中特征串后：
+var c = "app/course/stu_scan_sign.action",
+    r = c + u.split(c)[1],                       // query 原样（含 ?）
+    g = schoolInfo.schoolServiceURL + r;         // 拼回学校 iClass 域名
+// 然后内联调用：
+var i = { id: userInfo.result.id, longitude: n, latitude: a };
+requestPost(g, null, i).then(… "0" == e.STATUS ? "签到成功" : toast(e.ERRMSG))
+```
+
+`requestPost`（`components/net.js`，与首页共用）：`Content-Type: application/x-www-form-urlencoded`，
+头 `Cookie`（有才带）、`sessionId`、`Authorization`（storage 里有才带）。
+
+**`longitude` / `latitude` 的取值**：页面 `onShow` 走 `wx.getLocation({type:"gcj02"})`，
+**fail 回调里就是字面量 `n="0", a="0"`**（定位权限未开时 toast 提示并赋 "0"）。
+即 **`"0"` 是参照客户端自己的「无定位模式」**，不是特殊数值协议。
+
+**与本项目的字段核对**：`userInfo.result.id` = 本项目 `session.userId`
+（登录响应 `result.id`，`QingxinApiService.parseSession`）——同源。
+
+#### 三、对本项目的含义与修法（并入 1.3.6）
+
+§10.21 的探测否证了「参数名 / 主机 / GET-POST」三条，但**没有覆盖「参数在体里」这一维度**
+（当时对照组只有「POST 空表单体」）。扫码失败的归因因此重新打开为两个并存假设：
+
+- **请求形态**：该发 `id` 进表单体（「我的」页形态），而非拼在 query 上（首页形态）；
+- **标识形态**：§10.21 的假设——服务端按 7 位节次号查，32 位 `timeTableId` 落不到可签节次。
+
+两者不互斥，1.3.6 同时部署两个杠杆，但**来源说明分开记**，下一份现场记录即可分辨：
+
+1. `submitScanSign` 改为「我的」页形态：URL = `buildScanUrl(path, query)`（**query 一个
+   参数不加**，`withOwnUserId` 连同「id 拼 query」一并删除），表单体
+   `{id, longitude:"0", latitude:"0"}`。经纬度用 `"0"` 是**照抄参照客户端的无定位回退**，
+   本项目依旧不申请定位权限（README 隐私声明不变）。
+2. `ScanIdMapping`（§10.21 的第 (1) 项）原样保留：补 7 位节次号在 query 侧、条件触发，
+   与请求形态正交。
+3. 手动录入 32 位标识**不**切形态：留在已验证的一键 GET 通道上，作为对照组。
+4. 头部只带 `sessionId`：小程序另带 `Cookie`/`Authorization`，本项目没有这两样凭据，
+   而一键签到已证明 `sessionId` 单独足够通过认证。
+
+#### 四、下一份现场记录的判读表（修订 §10.21 的表）
+
+| 记录里出现 | 含义 | 下一步 |
+| --- | --- | --- |
+| **成功**（无论是否补了节次号） | 收口。「表单体带 id」即为本校正确形态 | 若补了节次号才成功，说明**两个**假设都真 |
+| 「已按今天课表补入 7 位节次号 …」仍失败，学校原话同前 | 请求形态杠杆未生效 | 回到服务端语义：这张码不属于本人可签的任何节次 |
+| 「今天课表里找不到对应节次」 | 码不在本人课表内（讲座 / 别的课），且形态假设未被检验 | 需要一块**本人课表内课程**的班牌来分辨两个假设 |
+| 「时间戳已过去 …」 | 班牌没在刷新，回到 §10.19 | 与形态无关 |
+
+**方法备记**（复现本轮）：PC 微信 4.x 的小程序包不再放在 `Documents/(x)WeChat Files/Applet/<appid>/`，
+改在 `%APPDATA%/Tencent/xwechat/radium/users/<user-hash>/applet/packages/<appid>/<版本>/__APP__.wxapkg`，
+加密方案与 §10.14 记录的 V1MMWX 相同（appid 作 PBKDF2 口令）；解出的索引自洽
+（457 条、末条 `off+size` 恰为流长）即可确认密钥正确，无须苛求头两字节魔数。
+
 ## 11. 待核实
 
 - **`cId` ↔ 7 位 `courseSchedId` 的映射**：注册表侧已确认无 7 位 / 32 位标识，故只能看移动端课表通道（探针 A1/A2/B1/C1，需登录）。

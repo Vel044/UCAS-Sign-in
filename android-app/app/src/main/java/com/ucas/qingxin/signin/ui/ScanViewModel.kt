@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ucas.qingxin.signin.QingxinApp
+import com.ucas.qingxin.signin.attendance.ScanIdMapping
 import com.ucas.qingxin.signin.attendance.ScanPayload
 import com.ucas.qingxin.signin.attendance.ScanTimestampPolicy
 import com.ucas.qingxin.signin.data.SignOutcome
@@ -56,11 +57,12 @@ data class ScanUiState(
      */
     val rawText: String = "",
     /**
-     * 本次**实际提交**到的地址（`query` 原样，`id` 只写参数名、不写用户编号）。
+     * 本次**实际提交**到的地址与请求体（`query` 原样，`id` 只写参数名、不写用户编号）。
      *
      * 与 [rawText] 成对使用：前者是学校发出来的东西，这一条是我们发出去的东西。
      * 两者一比，就能看出参数名与时间戳有没有被我们动过 —— 这正是「已失效」
-     * 这类含糊拒绝最需要的分辨依据。
+     * 这类含糊拒绝最需要的分辨依据。`id` 在表单体里（不在 URL 上，见
+     * [QingxinApiService.submitScanSign]），因此预览把体也单独写出来。
      */
     val submittedUrl: String = "",
     /**
@@ -323,8 +325,13 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
             fail("学校校时失败，请重试")
             return
         }
-        val query = payload.withTimestampOf(decision.valueMs)
-        val note = timestampNoteFor(payload, decision)
+        // 32 位标识 → 7 位节次号的补入（见 ScanIdMapping 的说明）。
+        // 只在**本机课表能证明是同一节课**时才补；证明不了就一个字节都不改。
+        val mappedSchedId = resolveSchedIdFor(payload)
+        var query = payload.withTimestampOf(decision.valueMs)
+        if (mappedSchedId != null) query = ScanIdMapping.withCourseSchedId(query, mappedSchedId)
+
+        val note = timestampNoteFor(payload, decision) + schedIdNote(payload, mappedSchedId)
         _ui.update {
             it.copy(
                 submittedUrl = previewOf(payload.path, query),
@@ -332,6 +339,62 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         runSign(payload.path, query, payload.identifier, payload.label, raw, note, decision)
+    }
+
+    /**
+     * 二维码的 32 位标识 → 本机课表里同一节课的 7 位节次号（找不到为 `null`）。
+     *
+     * ## 为什么查「今天的课表」就够
+     * 班牌上的签到码只会出现在**正在上的那节课**，而它的节次必然在今天课表里
+     * （一键签到也依赖同一份数据）。用 [com.ucas.qingxin.signin.course.CourseRepository.courses]
+     * 的当前快照，读的是内存值、不触网 —— 现场扫码这条路的延迟必须保持在毫秒级。
+     *
+     * ## 快照为空时要**先取一次**，否则会说出假话
+     * 用户若从通知/快捷方式直接进扫码页，课表可能一次都没加载过（`courses.value == null`）。
+     * 此时「没找到」并不等于「课表里没有」，若照旧写进记录，会把归因引向完全错误的方向
+     * （让人去查班牌属于哪门课，而真相只是本地还没拉课表）。
+     * 因此只在快照为空时才补一次 `loadToday()`：这是唯一会为此多花一个请求的情形，
+     * 且只发生在「本来就注定失败」的 32 位标识上。取不到就照实返回 `null`，
+     * 记录里那句话仍然成立（我们确实无法证明）。
+     *
+     * ## 为什么只认 `uuid`
+     * `Course` 同时带着节次层 `id`（7 位）与课表层 `uuid`（32 位），二维码里的
+     * 32 位标识与后者同源（见 `Course.uuid` 的说明）。只有 `uuid` 能证明
+     * 「二维码指的就是这一节课」—— 用别的字段猜会把别的课签掉。
+     */
+    private suspend fun resolveSchedIdFor(payload: ScanPayload.DirectSign): String? {
+        val uuid = payload.signCode.timeTableId
+        if (uuid.isEmpty()) return null
+        val known = app.courseRepository.courses.value
+        val courses = if (known == null) {
+            try {
+                app.courseRepository.loadToday().courses
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                emptyList()
+            }
+        } else {
+            known.courses
+        }
+        return ScanIdMapping.resolveSchedId(uuid, courses.map { it.uuid to it.id })
+    }
+
+    /**
+     * 「标识补入」这一句说明 —— 与 `timestamp` 的来源说明并列，因为两者都是
+     * 我们对学校所发参数做过的改动，而现场归因恰恰要靠「我们到底动了什么」。
+     *
+     * 三种情形分开写：补成功了 / 想补但课表里没有 / 根本不需要补。
+     * 中间那条尤其要写 —— 它解释了为什么这次请求与二维码原文一模一样，
+     * 而这句话正是「该去核对课表还是该去核对班牌」的分岔点。
+     */
+    private fun schedIdNote(payload: ScanPayload.DirectSign, mappedSchedId: String?): String = when {
+        mappedSchedId != null ->
+            "；二维码是 32 位标识，已按今天课表补入 7 位节次号 $mappedSchedId 一并提交" +
+                "（二维码原值保留）"
+        payload.signCode.timeTableId.isNotEmpty() ->
+            "；二维码是 32 位标识，但今天课表里找不到对应节次，只能原样重放"
+        else -> ""
     }
 
     /**
@@ -387,6 +450,8 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
                 "STATUS" to result.status,
                 "ERRCODE" to result.errCode,
                 "提示" to result.message,
+                // 学校原话与我们的转述分开记：现场归因靠的是前者。
+                "学校原话" to result.schoolMessage,
             )
             if (result.outcome == SignOutcome.SIGNED) {
                 settle(ok = true, text = result.message.ifBlank { "签到成功" })
@@ -499,29 +564,37 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun explain(result: SignResult, decision: ScanTimestampPolicy.Decision?): String {
         val base = result.message.ifBlank { outcomeMessage(result.outcome) }
-        if (result.outcome != SignOutcome.QR_EXPIRED) return base
+        // 学校原话必须附上（2026-10-19 补记）。
+        //
+        // 现场记录里只剩我们那句「请确认上课时间和课程状态」—— 那是**我们编的**转述，
+        // 而真正能解释「它到底在拒绝什么」的是学校自己那几个字。两者一起给出，
+        // 一次现场失败才能被离线读懂，不必再让用户去翻调试日志。
+        // `base` 里已经包含原话时不重复（`message` 有时就是原样引用）。
+        val withSchoolVoice =
+            if (result.schoolMessage.isBlank() || base.contains(result.schoolMessage)) base
+            else "$base\n学校原话：${result.schoolMessage}"
+
+        if (result.outcome != SignOutcome.QR_EXPIRED) return withSchoolVoice
         if (decision?.qrStale == true) {
             val age = decision.humanQrAge()
-            return "$base\n这张码上的时间戳已经过去 $age（班牌大约每 5 秒就该换一帧），" +
+            return "$withSchoolVoice\n这张码上的时间戳已经过去 $age（班牌大约每 5 秒就该换一帧），" +
                 "应用已改用本校校时重发，仍被学校判为失效 —— 麻烦换一块正在刷新的班牌，" +
                 "或请老师重新开一次签到。"
         }
-        return "$base\n班牌的签到码大约每 5 秒轮换一次，请对准最新一屏立刻重扫。"
+        return "$withSchoolVoice\n班牌的签到码大约每 5 秒轮换一次，请对准最新一屏立刻重扫。"
     }
 
     /**
-     * 预览本次提交到的地址。
+     * 预览本次提交到的地址与请求体。
      *
      * 这里**重新拼一次**而不是把 URL 从 API 层回传：目的在于这一页不依赖任何请求结果
      * 也能说清「发到哪」，且失败时（拿不到响应）也能说清。
-     * `id` 只写参数名、不写用户编号 —— 这段文字是给人看甚至给人转发的，
-     * 没必要把身份一起送出去，而诊断需要的信息（参数名、时间戳）一个都不少。
+     * `id` 在表单体里（不在 URL 上，见 [QingxinApiService.submitScanSign]），预览把它
+     * 连同经纬度占位一起单独写一行；编号只写参数名、不写本人值 —— 这段文字是给人看
+     * 甚至给人转发的，没必要把身份一起送出去，而诊断需要的信息（参数名、时间戳）一个都不少。
      */
-    private fun previewOf(path: String, query: String): String {
-        val url = app.api.buildScanUrl(path, query)
-        val sep = if ('?' in url) "&" else "?"
-        return "$url${sep}id=（本人学号）"
-    }
+    private fun previewOf(path: String, query: String): String =
+        app.api.buildScanUrl(path, query) + "\n表单体：id=（本人学号）&longitude=0&latitude=0"
 
     /** 二维码域名与本项目通道不一致时给一句人话；一致或没写域名时返回空串。 */
     private fun hostNoteFor(qrHost: String?): String {
