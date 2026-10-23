@@ -92,6 +92,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.ucas.qingxin.signin.R
 import com.ucas.qingxin.signin.QingxinApp
+import com.ucas.qingxin.signin.attendance.AttendanceNotifier
 import com.ucas.qingxin.signin.attendance.AutoSignExclusions
 import com.ucas.qingxin.signin.attendance.KeepAliveHelper
 import com.ucas.qingxin.signin.data.AttendanceUiStatus
@@ -475,6 +476,23 @@ private fun HomeScreen(
                         fontWeight = FontWeight.Medium,
                     )
                     Text("状态：${statusLabel(state.status)}")
+                    // 自动签到结果行（1.3.7）：后台签成 / 失败时不再只靠通知栏 ——
+                    // 应用正开着也要在主页直接给出结论，且课程列表的「已签到」
+                    // 角标由 MainViewModel 订阅课程数据流实时跟上。
+                    state.autoSignEvent?.let { evt ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            if (evt.success) {
+                                "自动签到：《${evt.courseName}》已完成" +
+                                    "（${AttendanceNotifier.formatClock(evt.atMs)}）"
+                            } else {
+                                "自动签到：《${evt.courseName}》未成功，请尽快手动签到"
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (evt.success) Color(0xFF2E7D4F) else Color(0xFFB3261E),
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = vm::refreshCourses, enabled = !state.busy) { Text("刷新课程") }

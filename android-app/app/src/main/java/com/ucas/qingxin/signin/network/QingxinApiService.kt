@@ -61,6 +61,17 @@ class QingxinApiService(
         /** 签到二维码自动锁定：开课前 25 分钟至下课前。 */
         const val SIGN_WINDOW_LEAD_MS = 25L * 60L * 1000L
 
+        /**
+         * 学校原话是否为「timestamp 参数异常」的专项拒绝（2026-10-22 现场记录：
+         * `时间戳传入异常！`，`ERRCODE=100`）。
+         *
+         * 抽成纯函数供单测钉住判据 —— 判据只有一个词「时间戳」，但这个词承载着
+         * 完全不同的自愈动作（强制重取校时并立刻重试，见 `performSign`），
+         * 误判成别的桶会丢掉那次自愈。
+         */
+        fun isTimestampRejected(schoolMessage: String): Boolean =
+            schoolMessage.contains("时间戳")
+
         /** `yyyyMMdd` 的长度，用于判定日期字段是否可用。 */
         private const val DAY_KEY_LENGTH = 8
 
@@ -486,12 +497,17 @@ class QingxinApiService(
         ).matcher(msg).find()
         val outside = Pattern.compile("未在上课时间|不在.*签到时间|不是上课时间|未选.*课|不属于.*课|已签到|重复签到")
             .matcher(msg).find()
+        // 学校对 timestamp 参数的专项拒绝（实测原话「时间戳传入异常！」，ERRCODE=100）。
+        // 判据只认这句原话里稳定的那个词：已知的其它拒绝（用户不存在 / 请使用扫码签到 /
+        // 当前时间不是上课时间）都不含「时间戳」。
+        val timestampRejected = isTimestampRejected(msg)
         // 「学校明确拒绝了这次签到」的形态：STATUS 说成功，但它自己给的签到状态不是 1。
         // 仅在要求该字段的通道上有意义（见 requireStuSignStatus 的说明）。
         val rejectedBySignStatus = status == "0" && stuSignStatus.isNotBlank() && stuSignStatus != "1"
 
         val outcome = when {
             expired -> SignOutcome.QR_EXPIRED
+            timestampRejected -> SignOutcome.TIMESTAMP_REJECTED
             status == "0" && (errCode.isBlank() || errCode == "0") &&
                 (!requireStuSignStatus || stuSignStatus == "1") &&
                 (!root.has("success") || root.optBoolean("success", true)) -> SignOutcome.SIGNED
@@ -502,6 +518,7 @@ class QingxinApiService(
         val message = when (outcome) {
             SignOutcome.SIGNED -> "签到成功"
             SignOutcome.QR_EXPIRED -> "学校提示签到码已失效，请刷新后重试"
+            SignOutcome.TIMESTAMP_REJECTED -> "学校判定提交的时间戳异常（已自动重新校时重试）"
             SignOutcome.OUTSIDE_SIGN_WINDOW -> when {
                 msg.contains("已签到") || msg.contains("重复签到") -> "学校提示已签到，请刷新课程状态"
                 msg.contains("未选") || msg.contains("不属于") -> "学校提示当前身份未选此课程"

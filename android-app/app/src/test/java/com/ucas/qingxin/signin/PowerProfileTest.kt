@@ -31,6 +31,7 @@ class PowerProfileTest {
         assertTrue("小部件数据兜底", saver.widgetFallbackMs >= normal.widgetFallbackMs)
         assertTrue("小部件周期任务", saver.widgetPeriodicMinutes >= normal.widgetPeriodicMinutes)
         assertTrue("讲座巡检", saver.lectureCheckHours >= normal.lectureCheckHours)
+        assertTrue("自动签到安全网", saver.safetyCheckMinutes >= normal.safetyCheckMinutes)
         assertTrue("窗口内重试上限", saver.maxAttempts <= normal.maxAttempts)
         assertTrue("秒级重绘宽限", saver.widgetGraceMs <= normal.widgetGraceMs)
     }
@@ -83,6 +84,16 @@ class PowerProfileTest {
         // 其余间隔也跟随用户档位，不被系统省电改写。
         assertEquals(normal.widgetFallbackMs, tightened.widgetFallbackMs)
         assertEquals(normal.lectureCheckHours, tightened.lectureCheckHours)
+        // 安全网是签到可靠性的最后兜底，更不能在低电量时刻收紧。
+        assertEquals(normal.safetyCheckMinutes, tightened.safetyCheckMinutes)
+    }
+
+    @Test
+    fun `自动签到安全网的间隔`() {
+        // 普通档每小时一次自愈巡检；省电档翻倍。都是可延迟的批处理任务，
+        // 与「无课日 gate 收摊为零成本」配套（见 SafetyNetGateTest）。
+        assertEquals(60L, normal.safetyCheckMinutes)
+        assertEquals(120L, saver.safetyCheckMinutes)
     }
 
     @Test

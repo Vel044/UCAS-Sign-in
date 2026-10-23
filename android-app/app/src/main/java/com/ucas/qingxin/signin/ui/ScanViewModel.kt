@@ -609,6 +609,7 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
         SignOutcome.QR_EXPIRED -> "签到码已失效，请对准班牌上最新的二维码重扫"
         SignOutcome.OUTSIDE_SIGN_WINDOW -> "当前不在签到时间内"
         SignOutcome.SIGN_RESULT_UNKNOWN -> "签到结果未知，请回首页刷新课程状态后再确认"
+        SignOutcome.TIMESTAMP_REJECTED -> "学校判定时间戳异常，请稍后重扫（下次会重新校时）"
     }
 
     private companion object {

@@ -115,7 +115,8 @@ class AttendanceDaemonService : Service() {
      * 排下一次「提醒 + 签到」。
      *
      * 两条分支，**都不是轮询**：
-     * 1. 已有到期未处理的课次 → 立刻尝试一次，失败则按 60–90 秒节奏再来（预算由引擎计数）；
+     * 1. 已有到期未处理的课次 → 立刻尝试一次，失败则「先快后慢」再来
+ *    （3–5 秒的两拍快速重试 + 60–90 秒慢节奏，预算由引擎计数）；
      * 2. 否则 `delay` 睡到下一个随机时刻（`delay` 不持 wakelock，休眠期间真实功耗 ≈ 0）。
      *
      * 无事可做（今日已签完 / 无课）时**主动 `stopSelf()`**，而不是只退出循环：
@@ -127,6 +128,8 @@ class AttendanceDaemonService : Service() {
         val app = application as? QingxinApp ?: return
         loopJob = scope.launch {
             try {
+                // 连续失败重试的拍数（跨循环保持）：供「先快后慢」的重试节奏取间隔。
+                var retryRound = 0
                 while (isActive) {
                     if (!AutoSignEngine.shouldRunDaemon(app)) break
                     runCatching { AutoSignEngine.refreshDaemonStatus(applicationContext, app, null) }
@@ -134,10 +137,32 @@ class AttendanceDaemonService : Service() {
                     // 1) 到期未处理 → 尝试（含窗口内重试的节奏控制）
                     val due = runCatching { AutoSignEngine.dueNow(applicationContext, app) }.getOrNull()
                     if (due != null) {
-                        runCatching { AutoSignEngine.runOnce(applicationContext, app) }
-                        runCatching { AttendanceScheduler.ensureSchedule(applicationContext) }
-                        delay(AutoSignWindowRunner.retryDelayMs())
-                        continue
+                        val outcome = runCatching {
+                            AutoSignEngine.runOnce(applicationContext, app)
+                        }.getOrNull()
+                        runCatching {
+                            AttendanceScheduler.ensureSchedule(applicationContext, startDaemon = false)
+                        }
+                        // 只有「真的需要再来一拍」才走重试节奏：
+                        // - RETRY：暂时性失败，**先快后慢**（见 [AutoSignWindowRunner.retryDelayMs]）
+                        //   —— 瞬时失败在几秒内补一拍，不让实签时刻比随机时刻晚一分多钟；
+                        // - YIELDED：用户正在手动签到，让路不是失败 —— 维持慢节奏等它结束，
+                        //   绝不几秒一拍地往手动路径上撞。
+                        // IDLE 的两种成因（设备时钟快于校时、执行锁被占）结局一致 ——
+                        // 停手，落回第 2 分支睡到下一个时刻；1.3.6 在这里不看出轮询空转，
+                        // 校时偏差期间会每 60–90 秒打一次校时接口。
+                        when (outcome) {
+                            EngineOutcome.RETRY -> {
+                                retryRound++
+                                delay(AutoSignWindowRunner.retryDelayMs(retryRound))
+                                continue
+                            }
+                            EngineOutcome.YIELDED -> {
+                                delay(AutoSignWindowRunner.slowRetryDelayMs())
+                                continue
+                            }
+                            else -> retryRound = 0
+                        }
                     }
 
                     // 2) 睡到下一个随机时刻
@@ -159,7 +184,7 @@ class AttendanceDaemonService : Service() {
                     if (wait > 0) delay(wait)
                     // 到点：立即尝试一次，随后回到循环开头由「到期」分支接管重试。
                     runCatching { AutoSignEngine.runOnce(applicationContext, app) }
-                    runCatching { AttendanceScheduler.ensureSchedule(applicationContext) }
+                    runCatching { AttendanceScheduler.ensureSchedule(applicationContext, startDaemon = false) }
                 }
             } finally {
                 // 循环退出 = 今天没有值得常驻的事了：主动退场，把后续交给闹钟与 WorkManager。

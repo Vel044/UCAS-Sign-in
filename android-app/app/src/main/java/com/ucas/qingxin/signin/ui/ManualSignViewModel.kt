@@ -161,5 +161,6 @@ class ManualSignViewModel(app: Application) : AndroidViewModel(app) {
         SignOutcome.QR_EXPIRED -> "二维码已过期，请稍后重试"
         SignOutcome.OUTSIDE_SIGN_WINDOW -> "当前不在签到时间内"
         SignOutcome.SIGN_RESULT_UNKNOWN -> "签到结果未知，请刷新后确认"
+        SignOutcome.TIMESTAMP_REJECTED -> "学校判定时间戳异常，已自动重新校时，请再试一次"
     }
 }

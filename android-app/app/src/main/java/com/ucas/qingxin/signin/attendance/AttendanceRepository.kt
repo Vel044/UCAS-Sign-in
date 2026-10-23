@@ -279,7 +279,7 @@ class AttendanceRepository(
             // Manual one-click: do not hard-block on local window guess; backend is authority.
             // submitAttendance 会按标识形态选中 courseSchedId / timeTableId 参数。
             val qr = qrTimeline.refreshQr(courseKey)
-            return try {
+            val first = try {
                 api.submitAttendance(session, courseKey, qr.schoolTimestampMs)
             } catch (e: ApiException) {
                 if (e.code.startsWith("HTTP_") || e.message?.contains("登录") == true) {
@@ -290,6 +290,19 @@ class AttendanceRepository(
                     throw e
                 }
             }
+            // 学校判「时间戳传入异常」：多半是刚才那份校时样本偏了（高 RTT / 非对称链路
+            // 把校时推到未来，或 get_timestamp 节点时钟有偏）。**强制丢弃样本重取**并
+            // 立刻重试一次 —— 2026-10-22 的现场记录里，用户手速复现了这个自愈：
+            // 连按 8 次、前 7 次同错、第 8 次（恰逢样本过期重取）成功。这里把同样的
+            // 动作自动化，不靠用户手速。重试失败或重校时失败都如实返回第一次的结果：
+            // 它带着学校的原话，比一个网络异常更能说明问题。
+            if (first.outcome == SignOutcome.TIMESTAMP_REJECTED) {
+                runCatching {
+                    val fresh = qrTimeline.syncClock(force = true).schoolNowMs
+                    api.submitAttendance(session, courseKey, fresh)
+                }.getOrNull()?.let { return it }
+            }
+            return first
         } finally {
             inFlightCourseId = null
         }
@@ -315,6 +328,7 @@ class AttendanceRepository(
             SignOutcome.QR_EXPIRED to "签到码已失效",
             SignOutcome.OUTSIDE_SIGN_WINDOW to "不在签到时间内",
             SignOutcome.SIGN_RESULT_UNKNOWN to "签到结果未知",
+            SignOutcome.TIMESTAMP_REJECTED to "学校判定时间戳异常（已自动重新校时重试）",
         )
     }
 }

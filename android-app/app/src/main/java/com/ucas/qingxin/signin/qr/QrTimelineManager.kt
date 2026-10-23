@@ -51,20 +51,37 @@ class QrTimelineManager(
                 )
             }
         }
-        val t0 = System.currentTimeMillis()
-        val serverTs = api.getServerTimestampMs()
-        val t1 = System.currentTimeMillis()
-        if (t1 < t0) throw ApiException("TIME_SYNC_EXPIRED", "学校校时已过期，请重试")
-        val rtt = t1 - t0
-        val schoolAtReceive = serverTs + rtt / 2
+        // 取样最多 3 次并保留 RTT 最低的一次；RTT 低说明链路对称性假设成立，
+        // NTP 式 `+ rtt/2` 的修正才可信。2026-10-22 的现场记录（连按 8 次、
+        // 前 7 次被学校判「时间戳传入异常」、第 8 次成功）证明坏样本确实存在：
+        // 高 RTT / 非对称链路会把校时推到「未来」，学校只认它自己钟附近的一个窗口。
+        var bestServerTs = 0L
+        var bestRtt = Long.MAX_VALUE
+        var bestAt = 0L
+        for (attempt in 0 until SAMPLE_ATTEMPTS) {
+            val t0 = System.currentTimeMillis()
+            val serverTs = api.getServerTimestampMs()
+            val t1 = System.currentTimeMillis()
+            if (t1 < t0) throw ApiException("TIME_SYNC_EXPIRED", "学校校时已过期，请重试")
+            val rtt = t1 - t0
+            if (rtt < bestRtt) {
+                bestRtt = rtt
+                bestServerTs = serverTs
+                bestAt = t1
+            }
+            // RTT 已经够低：再取样只会平添延迟，不会显著提高可信度。
+            if (rtt <= GOOD_RTT_MS) break
+        }
+        if (bestRtt == Long.MAX_VALUE) throw ApiException("TIME_SYNC_EXPIRED", "学校校时已过期，请重试")
+        val schoolAtReceive = correctedSchoolMs(bestServerTs, bestRtt)
         sampleSchoolMs = schoolAtReceive
-        sampleLocalMs = t1
-        sampleRttMs = rtt
+        sampleLocalMs = bestAt
+        sampleRttMs = bestRtt
         ClockReading(
             schoolNowMs = schoolAtReceive,
             ageMs = 0,
-            rttMs = rtt,
-            sampledAtLocalMs = t1,
+            rttMs = bestRtt,
+            sampledAtLocalMs = bestAt,
         )
     }
 
@@ -117,5 +134,31 @@ class QrTimelineManager(
         _snapshot.value = null
         sampleSchoolMs = null
         sampleLocalMs = null
+    }
+
+    companion object {
+        /** 校时取样次数上限：RTT 一直很差时也只补两次，避免把签到拖成校时循环。 */
+        const val SAMPLE_ATTEMPTS = 3
+
+        /** RTT 低于它就不再补样：校园网正常时 RTT 通常在几百毫秒以内。 */
+        const val GOOD_RTT_MS = 1_200L
+
+        /**
+         * `+ rtt/2` 修正量的上限。
+         *
+         * 非对称链路（请求快、响应慢）会让 `rtt/2` 系统性高估、把校时推到**未来**，
+         * 而学校对「未来」的容忍显然比对「过去」严（过去的值有真实流量验证过：
+         * 照抄 4 秒前的二维码时间戳能通过）。封顶宁可偏过去 1~2 秒，也不冒
+         * 「时间戳传入异常」的险。2026-10-22 现场记录的完整分析见
+         * `docs/lecture-signin-research.md` §10.23。
+         */
+        const val HALF_RTT_CAP_MS = 1_500L
+
+        /**
+         * 服务器时间 + NTP 式修正（封顶）：`serverTs + min(rtt/2, [HALF_RTT_CAP_MS])`。
+         * 纯函数，供单测钉住封顶行为。
+         */
+        fun correctedSchoolMs(serverTsMs: Long, rttMs: Long): Long =
+            serverTsMs + minOf(rttMs / 2, HALF_RTT_CAP_MS)
     }
 }

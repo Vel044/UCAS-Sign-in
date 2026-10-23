@@ -39,6 +39,18 @@ enum class SignOutcome {
     QR_EXPIRED,
     OUTSIDE_SIGN_WINDOW,
     SIGN_RESULT_UNKNOWN,
+
+    /**
+     * 学校判定 `timestamp` 参数异常（实测原话「时间戳传入异常！」，`ERRCODE=100`）。
+     *
+     * 与 [QR_EXPIRED]（值太旧）不同：这一种在校时样本**偏离**时出现 —— 同一会话
+     * 几秒内成败交错（2026-10-22 现场记录：连按 8 次，前 7 次此错、第 8 次成功），
+     * 说明学校比的是「我们的校时样本」与「它自己的钟」的偏差，而不是新鲜度。
+     * 因此它是一等公民而不是 [OUTSIDE_SIGN_WINDOW] 下的一个字符串分支：
+     * 提交层会据此**强制重取校时并立刻重试一次**（见
+     * `AttendanceRepository.performSign`）。
+     */
+    TIMESTAMP_REJECTED,
 }
 
 data class SignResult(

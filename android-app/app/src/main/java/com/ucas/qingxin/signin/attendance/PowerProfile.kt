@@ -53,6 +53,15 @@ enum class PowerProfile(
     val lectureCheckHours: Long,
     /** 更新检查的节流间隔。 */
     val updateCheckIntervalMs: Long,
+    /**
+     * 自动签到「安全网」周期任务的间隔（1.3.7 起）。
+     *
+     * 它是闹钟被 ROM / 电池策略掐掉后的最后一条自愈通道：JobScheduler 周期任务、
+     * 可延迟、与其他应用的批处理合并，空闲时毫秒级开销。只在「自动签到开着且
+     * 今日可能还有待签课程」时登记（无课日由 gate 撤销，见
+     * [AttendanceScheduler.updateSafetyPeriodic]），因此空闲日的真实成本为 0。
+     */
+    val safetyCheckMinutes: Long,
 ) {
     NORMAL(
         daemonEnabled = true,
@@ -63,6 +72,7 @@ enum class PowerProfile(
         widgetGraceMs = MINUTE_MS,
         lectureCheckHours = 24L,
         updateCheckIntervalMs = 24L * HOUR_MS,
+        safetyCheckMinutes = 60L,
     ),
 
     SAVER(
@@ -76,6 +86,7 @@ enum class PowerProfile(
         widgetGraceMs = 0L,
         lectureCheckHours = 48L,
         updateCheckIntervalMs = 24L * HOUR_MS,
+        safetyCheckMinutes = 120L,
     ),
     ;
 
@@ -118,6 +129,12 @@ class ResolvedPowerProfile private constructor(
     val widgetPeriodicMinutes: Long get() = profile.widgetPeriodicMinutes
     val lectureCheckHours: Long get() = profile.lectureCheckHours
     val updateCheckIntervalMs: Long get() = profile.updateCheckIntervalMs
+    /**
+     * 安全网间隔**不**被系统省电收紧：它是签到可靠性的最后兜底，
+     * 收紧它等于在用户最可能开省电的低电量时刻削弱自动签到 —— 与
+     * 「提醒与守护服务不随系统省电消失」是同一条取舍。
+     */
+    val safetyCheckMinutes: Long get() = profile.safetyCheckMinutes
     val saver: Boolean get() = profile == PowerProfile.SAVER
 
     companion object {
