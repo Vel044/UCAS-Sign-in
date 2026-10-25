@@ -174,9 +174,14 @@ android {
         //           修法 = 校时取样取 RTT 最低且修正封顶 1.5s + 识别该拒绝为
         //           TIMESTAMP_REJECTED 并强制重校时立刻重试一次（详见
         //           docs/lecture-signin-research.md §10.23）。
-        versionCode = 51
-        // 1.3.6 → 1.3.7：后台自动签到可靠性加固（SWEEP 补签槽 + 双 WorkManager 兜底）。
-        versionName = "1.3.7"
+        // 51 → 52：1.3.8（2026-10-24，所有者授权轮）：① stu_auto_sign 备选通道 ——
+        //           无 timestamp、固定校区坐标（雁栖湖），在两段校时重试仍被拒后
+        //           自动改走（仅 7 位编号）；② 签到记录时间升为毫秒精度（.SSS），
+        //           支撑时间轴对齐实验（§10.25）。1.3.7 与其云端发布版一致，
+        //           本轮内容不再并入。
+        versionCode = 52
+        // 1.3.7 → 1.3.8：备选签到通道（stu_auto_sign）+ 毫秒级签到记录。
+        versionName = "1.3.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 端点来自本地 local.properties，绝不硬编码（见文件顶部说明）。

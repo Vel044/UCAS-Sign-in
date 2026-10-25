@@ -175,8 +175,10 @@ class SignRecordStore(private val dir: File) {
 
         private const val FIELD_SEP = '\u0001'
 
+        // 毫秒精度：现场实验要对齐「本地时刻 ↔ 提交的 timestamp ↔ 学校判定」三条时间轴，
+        // 秒级格式会让同一秒内的连续尝试无法配对（2026-10-22 的记录里 18:36:15 就有两条）。
         private val STAMP = ThreadLocal.withInitial {
-            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
         }
 
         private val DAY = ThreadLocal.withInitial {

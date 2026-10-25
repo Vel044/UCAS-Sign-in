@@ -72,6 +72,20 @@ class QingxinApiService(
         fun isTimestampRejected(schoolMessage: String): Boolean =
             schoolMessage.contains("时间戳")
 
+        /**
+         * 是否为 7 位节次编号 —— [submitAutoSign] 只吃这个形态（32 位标识没有参数名可用）。
+         * 供提交层的通道选择（`AttendanceRepository.performSign`）与单测共用。
+         */
+        fun isSevenDigitId(courseIdOrUuid: String): Boolean =
+            SEVEN_DIGIT_ID.matches(courseIdOrUuid.trim())
+
+        /**
+         * 备选通道的固定坐标（GCJ-02）：雁栖湖校区中心，项目所有者 2026-10-24 授权。
+         * 见 [submitAutoSign] 的定位取值说明。
+         */
+        const val AUTO_SIGN_LONGITUDE = "116.6762"
+        const val AUTO_SIGN_LATITUDE = "40.4086"
+
         /** `yyyyMMdd` 的长度，用于判定日期字段是否可用。 */
         private const val DAY_KEY_LENGTH = 8
 
@@ -256,6 +270,52 @@ class QingxinApiService(
             source = "一键 / 手动打卡（GET）",
         )
         parseSignResult(json)
+    }
+
+    /**
+     * 备选签到通道：`course/stu_auto_sign.action`（**无 timestamp**）。
+     *
+     * ## 形态（v65 小程序逐字核对，2026-10-24，`docs/lecture-signin-research.md` §10.24）
+     * 挂在 iClass 主机（`schoolServiceURL`，本校可达），POST 表单体：
+     * `{id, courseSchedId, routerInfo(BSSID), longitude, latitude, machineInfo}`，
+     * 成功判据小程序只看 `STATUS == "0"`。**时间戳参数不存在** —— 窗口由服务端
+     * 用它自己的钟判定，因此这条通道天然免疫 §10.23 的「时间戳传入异常」。
+     *
+     * ## 定位取值（项目所有者书面授权的固定值）
+     * 参照客户端（小程序）对这条通道有**定位硬闸**：未授权位置 / 定位未开就拒绝发送，
+     * 从不发送回退坐标 —— 因此本应用发送的是**用户授权的校区固定坐标**
+     * （雁栖湖校区中心，GCJ-02，与小程序 `wx.getLocation({type:"gcj02"})` 同一坐标系），
+     * 代替真实 GPS。这不是参照客户端自己的任何真实形态，属于本项目在用户明确授权下的
+     * 主动取舍；坐标值可在 companion 常量处随时修正。
+     *
+     * `routerInfo`（WiFi BSSID）参照客户端取自 `getConnectedWifi`，未连 WiFi 时为空 ——
+     * 这里固定发空串；`machineInfo` 参照客户端发 `"iOS"` / `"Android"` 平台串。
+     */
+    suspend fun submitAutoSign(
+        session: SchoolSession,
+        courseSchedId: String,
+    ): SignResult = withContext(Dispatchers.IO) {
+        val json = executeJsonLogged(
+            Request.Builder()
+                .url(BASE_URL + "course/stu_auto_sign.action")
+                .header("User-Agent", USER_AGENT)
+                .header("Cache-Control", "no-store")
+                .header("sessionId", session.sessionId)
+                .post(
+                    FormBody.Builder()
+                        .add("id", session.userId)
+                        .add("courseSchedId", courseSchedId.trim())
+                        .add("routerInfo", "")
+                        .add("longitude", AUTO_SIGN_LONGITUDE)
+                        .add("latitude", AUTO_SIGN_LATITUDE)
+                        .add("machineInfo", "Android")
+                        .build(),
+                )
+                .build(),
+            timeoutSec = 10,
+            source = "备选通道（stu_auto_sign，无时间戳，固定校区坐标）",
+        )
+        parseSignResult(json, requireStuSignStatus = false)
     }
 
     /**

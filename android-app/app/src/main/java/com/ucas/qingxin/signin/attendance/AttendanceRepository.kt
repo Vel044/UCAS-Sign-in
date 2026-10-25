@@ -290,17 +290,30 @@ class AttendanceRepository(
                     throw e
                 }
             }
-            // 学校判「时间戳传入异常」：多半是刚才那份校时样本偏了（高 RTT / 非对称链路
-            // 把校时推到未来，或 get_timestamp 节点时钟有偏）。**强制丢弃样本重取**并
-            // 立刻重试一次 —— 2026-10-22 的现场记录里，用户手速复现了这个自愈：
-            // 连按 8 次、前 7 次同错、第 8 次（恰逢样本过期重取）成功。这里把同样的
-            // 动作自动化，不靠用户手速。重试失败或重校时失败都如实返回第一次的结果：
-            // 它带着学校的原话，比一个网络异常更能说明问题。
+            // 学校判「时间戳传入异常」：两段式自愈（2026-10-24 扩展）。
+            //
+            // 第一段（§10.23）：多半是校时样本偏了（高 RTT / 非对称链路把校时推到未来，
+            // 或 get_timestamp 节点时钟有偏）→ **强制丢弃样本重取**并立刻重试一次。
+            // 2026-10-22 的现场记录里，用户手速复现过这个自愈（连按 8 次、第 8 次成功）。
+            //
+            // 第二段（用户授权新增）：重校时后**仍**被判时间戳异常 → 换 `stu_auto_sign`
+            // 备选通道 —— 那条通道没有 timestamp 参数，窗口由服务端自己的钟判定，
+            // 问题在构造上不存在。仅 7 位节次编号可用（该通道只有这一个标识参数），
+            // 坐标为项目所有者授权的校区固定值（见 QingxinApiService.submitAutoSign）。
+            // 任一失败都如实返回最接近的一次结果：它带着学校的原话，最能说明问题。
             if (first.outcome == SignOutcome.TIMESTAMP_REJECTED) {
-                runCatching {
+                val retried = runCatching {
                     val fresh = qrTimeline.syncClock(force = true).schoolNowMs
                     api.submitAttendance(session, courseKey, fresh)
-                }.getOrNull()?.let { return it }
+                }.getOrNull()
+                when {
+                    retried != null && retried.outcome != SignOutcome.TIMESTAMP_REJECTED ->
+                        return retried
+                    QingxinApiService.isSevenDigitId(courseKey) -> runCatching {
+                        api.submitAutoSign(session, courseKey)
+                    }.getOrNull()?.let { return it }
+                }
+                return retried ?: first
             }
             return first
         } finally {
