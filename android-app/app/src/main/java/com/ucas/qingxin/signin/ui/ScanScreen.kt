@@ -101,6 +101,13 @@ fun ScanScreen(
     val askCamera = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted = it }
+    // 相册选图：系统 Photo Picker（PickVisualMedia）**不需要任何存储权限** ——
+    // 用户在系统选择器里选哪张，应用只能拿到哪张，是 Scoped 授权；旧设备自动
+    // 回退到文档选择器（同样免权限）。比申请「照片和视频」全库权限在兼容性与
+    // 隐私上都更好，这正是选它而不是 READ_MEDIA_IMAGES 的原因。
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> vm.onImageSelected(uri) }
 
     // 进页即申请：在班牌前多一次「先进页面、再点授权」的往返是纯粹的浪费。
     LaunchedEffect(Unit) {
@@ -156,6 +163,16 @@ fun ScanScreen(
                 lineHeight = 15.sp,
                 modifier = Modifier.weight(1f),
             )
+            TextButton(
+                onClick = {
+                    pickImage.launch(
+                        androidx.activity.result.PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                        ),
+                    )
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) { Text("相册选图", fontSize = 13.sp) }
             TextButton(
                 onClick = onOpenManual,
                 contentPadding = PaddingValues(horizontal = 8.dp),

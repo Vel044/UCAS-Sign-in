@@ -29,8 +29,19 @@
       本应用走 GitHub 侧载分发，不涉及 Google Play 对该权限的政策限制。
     -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- 精确闹钟：让随机签到时刻不被 Doze 推迟；被撤销时自动降级为非精确闹钟。 -->
+    <!--
+      精确闹钟：让随机签到时刻不被 Doze 推迟；被撤销时自动降级为非精确闹钟。
+      两个权限并用，覆盖不同系统版本：
+      · SCHEDULE_EXACT_ALARM（API 31+）：Android 12 上默认授予、可撤销；
+        但 targetSdk ≥ 33 时在 Android 14+ 上**默认拒绝** —— 只有它的话，
+        新系统新机上所有签到闹钟会静默降级为非精确（Doze 推迟可达 ~15 分钟）。
+      · USE_EXACT_ALARM（API 33+）：安装即自动授予，专为闹钟类应用设计
+        （本项目侧载分发，无商店政策约束，同 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+        的先例）；Android 14+ 上正是它让 canScheduleExactAlarms() 恢复 true。
+      · Android 12（31/32）不认识 USE_EXACT_ALARM、自动忽略，走上一条流程。
+    -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <!--
       传输安全：全局禁明文，仅放行课程注册表那一个域名。
@@ -43,6 +54,7 @@
         android:name=".QingxinApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="false"
         android:icon="@drawable/ic_launcher_legacy"
         android:label="@string/app_name"
@@ -177,6 +189,8 @@
                 <action android:name="android.intent.action.LOCALE_CHANGED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <!-- 撤销精确闹钟权限时系统取消全部已排精确闹钟：必须立刻降级重排 -->
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

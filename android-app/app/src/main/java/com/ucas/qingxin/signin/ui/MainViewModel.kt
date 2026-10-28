@@ -70,6 +70,13 @@ data class AppUiState(
     val excludedToday: Set<String> = emptySet(),
     /** 自动打卡排除名单：**长期不打卡**的课程键。 */
     val excludedPermanent: Set<String> = emptySet(),
+    /**
+     * 排除名单写入的异常提示（null = 正常）。
+     *
+     * 排除写入在任何一步失败都必须**可见**：旧实现静默吞掉，用户点开关没反应
+     * 还以为是应用坏了（「开不了 / 开了关不掉」反馈的成因之一）。
+     */
+    val exclusionNotice: String? = null,
     /** 版本检查与更新提示。 */
     val update: UpdateUiState = UpdateUiState(),
     /**
@@ -565,21 +572,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 不重排就会在那节课上白白醒一次（并且真的签上去）。
      */
     fun setExcludeToday(course: Course, excluded: Boolean) {
-        if (!app.isReady) return
-        val today = AutoSignRandomizer.todayKey()
+        if (!app.isReady) {
+            _ui.update { it.copy(exclusionNotice = "应用尚未初始化完成，请重启应用后再试") }
+            return
+        }
         val key = AutoSignExclusions.courseKey(course)
-        runCatching { app.autoSignExclusionStore.setExcludedToday(key, today, excluded) }
-        _ui.update { it.copy(excludedToday = readExclusions().first) }
+        runCatching {
+            app.autoSignExclusionStore.setExcludedToday(key, AutoSignRandomizer.todayKey(), excluded)
+        }
+        reconcileExclusions(key, wantToday = excluded, wantPermanent = null)
         afterExclusionsChanged()
     }
 
     /** 把一门课加入 / 移出「长期不自动打卡」名单。 */
     fun setExcludePermanent(course: Course, excluded: Boolean) {
-        if (!app.isReady) return
+        if (!app.isReady) {
+            _ui.update { it.copy(exclusionNotice = "应用尚未初始化完成，请重启应用后再试") }
+            return
+        }
         val key = AutoSignExclusions.courseKey(course)
         runCatching { app.autoSignExclusionStore.setPermanent(key, excluded) }
-        _ui.update { it.copy(excludedPermanent = readExclusions().second) }
+        reconcileExclusions(key, wantToday = null, wantPermanent = excluded)
         afterExclusionsChanged()
+    }
+
+    /**
+     * 写后核对：从存储**重读**实际状态，与本次期望不符就给出可见的失败提示。
+     *
+     * 旧实现写完直接信状态更新，「写没写上」无从知晓 —— 排除功能最恶劣的失败
+     * 形态恰恰是静默的：用户以为排除了，课照签；以为取消了，课不签。
+     */
+    private fun reconcileExclusions(
+        courseKey: String,
+        wantToday: Boolean?,
+        wantPermanent: Boolean?,
+    ) {
+        val actual = readExclusions()
+        val problems = buildList {
+            if (wantToday != null && (courseKey in actual.first) != wantToday) {
+                add(if (wantToday) "「今日跳过」写入失败" else "「今日跳过」取消失败")
+            }
+            if (wantPermanent != null && (courseKey in actual.second) != wantPermanent) {
+                add(if (wantPermanent) "「长期不打卡」写入失败" else "「长期不打卡」取消失败")
+            }
+        }
+        _ui.update {
+            it.copy(
+                excludedToday = actual.first,
+                excludedPermanent = actual.second,
+                exclusionNotice = problems.joinToString("；").ifEmpty { null },
+            )
+        }
     }
 
     /**
@@ -591,9 +634,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun afterExclusionsChanged() {
         val context = getApplication<Application>()
-        runCatching { com.ucas.qingxin.signin.attendance.AttendanceScheduler.ensureSchedule(context) }
-        if (!_ui.value.settings.autoSignEnabled) return
+        // 重排**必须在 IO 线程**：planToday（读 SharedPreferences 与课表缓存）+
+        // 三路闹钟 IPC + WorkManager 入队在低端机上是可感知的主线程停顿 ——
+        // 状态更新后的那一帧被阻塞，选中态迟迟画不出来，用户看到的就是
+        // 「点了开关没反应 / 开了关不掉」。重排本身线程安全，挪走不影响语义。
         viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                com.ucas.qingxin.signin.attendance.AttendanceScheduler.ensureSchedule(context)
+            }
+            if (!_ui.value.settings.autoSignEnabled) return@launch
             runCatching {
                 com.ucas.qingxin.signin.attendance.AutoSignEngine
                     .refreshDaemonStatus(context, app, null)

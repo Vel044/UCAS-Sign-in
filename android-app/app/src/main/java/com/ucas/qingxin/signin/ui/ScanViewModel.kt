@@ -1,6 +1,7 @@
 package com.ucas.qingxin.signin.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ucas.qingxin.signin.QingxinApp
@@ -13,12 +14,14 @@ import com.ucas.qingxin.signin.logging.LogKind
 import com.ucas.qingxin.signin.network.ApiException
 import com.ucas.qingxin.signin.network.QingxinApiService
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -209,6 +212,45 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
      * 三条分支（含不发请求的 [ScanPayload.NotSign]）都要留下它 ——
      * 「扫了半天，扫出来是别的东西」同样是需要解释的现场。
      */
+    /**
+     * 相册选图入口：装载 → 解码 → 走与相机**完全相同**的 [onDecoded] 管线。
+     *
+     * 「相同」是刻意的：分类（[ScanPayload.parse]）、时间戳策略、标识补入、
+     * 提交、记录与日志，一条分支都不该有第二份实现 —— 相册里的图与取景框里的
+     * 码，对后端是同一个东西。
+     *
+     * 反馈按模式分流：连扫模式失败只写瞬时回显（不打断取景）；单发模式用
+     * 结果卡片。识别不出二维码时同样落日志 —— 「选了图但没识别出」也是现场。
+     */
+    fun onImageSelected(uri: Uri?) {
+        if (uri == null) return
+        if (_ui.value.submitting) return
+        viewModelScope.launch {
+            _ui.update { it.copy(flash = "正在识别图片…", flashOk = true) }
+            val raw = withContext(Dispatchers.IO) {
+                val bitmap = ScanImageQr.load(app, uri) ?: return@withContext null
+                ScanImageQr.decode(bitmap)
+            }
+            if (raw == null) {
+                app.signLog.append(
+                    LogKind.SCAN,
+                    "来源" to "相册图片",
+                    "判定" to "未识别出二维码",
+                )
+                if (_ui.value.continuous) {
+                    _ui.update {
+                        it.copy(flash = "图片里没有识别出二维码，请换一张或直接对准班牌", flashOk = false)
+                    }
+                } else {
+                    fail("图片里没有识别出二维码。请确认图片里有清晰的签到码，或直接对准班牌扫码")
+                }
+                return@launch
+            }
+            app.signLog.append(LogKind.SCAN, "来源" to "相册图片")
+            onDecoded(raw)
+        }
+    }
+
     fun onDecoded(raw: String, perf: ScanPerf? = null) {
         // 连扫去重：同一张码在窗口内只提交一次（理由见 submitted）。
         // 必须在取闸门**之前**做，且跳过时**不占闸门** —— 这一帧应当被当作没看见。
@@ -313,14 +355,24 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: ApiException) {
                 // 校时拿不到不等于签到失败：二维码自带时间戳时我们仍有一个
-                // 「学校自己发出来的」值可以照抄（见策略的不变量 2）。
+                // 「学校自己发出来的」值可以照抄（见策略的不变量 2）；
+                // 1.3.9 起还有更下一级的校准推算（见下）。
                 null
             }
         } else {
             null
         }
 
-        val decision = ScanTimestampPolicy.resolve(qrTsMs, schoolNowMs)
+        // 现场校时不可用时的最后一档：按最近一次校准偏差（学校钟 ↔ 本机钟）
+        // 从本机时间推算学校时间 —— 零网络、毫秒级，失败形态从「必被拒的旧值」
+        // 变成「推算的新值」。只在上面拿不到权威校时时才取。
+        val estimatedSchoolNowMs = if (schoolNowMs == null) {
+            runCatching { app.qrTimeline.calibratedSchoolNowOrNull() }.getOrNull()
+        } else {
+            null
+        }
+
+        val decision = ScanTimestampPolicy.resolve(qrTsMs, schoolNowMs, estimatedSchoolNowMs)
         if (decision == null) {
             fail("学校校时失败，请重试")
             return
@@ -415,6 +467,19 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     ): String = when {
         decision.confidence == ScanTimestampPolicy.Decision.Confidence.NO_QR_TIMESTAMP ->
             "二维码只是一个裸编号，请求由本应用拼出，已用本校校时补入 timestamp"
+        decision.confidence == ScanTimestampPolicy.Decision.Confidence.CALIBRATED_CLOCK ->
+            // 校准推算必须如实交代：它的时基是「本机钟 + 校准偏差」，
+            // 设备时钟在校准之后被改过的话这个值会整体偏移。
+            when {
+                decision.qrStale ->
+                    "现场校时不可用，已按本机时钟与最近校准偏差推算学校时间提交" +
+                        "（二维码时间戳已过去 ${decision.humanQrAge()}）"
+                decision.qrAgeMs != null ->
+                    "现场校时不可用，已按本机时钟与最近校准偏差推算学校时间核对" +
+                        "（距推算校时 ${decision.humanQrAge()}），原样重放，未增删任何参数"
+                else ->
+                    "现场校时不可用，已按本机时钟与最近校准偏差推算学校时间补入 timestamp"
+            }
         decision.confidence == ScanTimestampPolicy.Decision.Confidence.NO_SCHOOL_CLOCK ->
             "校时不可用，timestamp 沿用二维码原值（不使用本机时间）"
         decision.qrStale ->

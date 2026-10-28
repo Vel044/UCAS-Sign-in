@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -397,6 +398,9 @@ private fun HomeScreen(
 ) {
     // 进入主页时按需自动检查更新（节流默认 24 小时，见 MainViewModel.onEnterHome）。
     LaunchedEffect(Unit) { vm.onEnterHome() }
+    // 防撞 item key（见 courseListKeys 说明）：在 LazyColumn 之外算好，
+    // LazyListScope 不是 Composable 上下文，remember 进不去。
+    val homeCourseKeys = remember(state.courses) { courseListKeys(state.courses) }
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -529,7 +533,9 @@ private fun HomeScreen(
                 color = Color(0xFF5B6B63),
             )
         }
-        items(state.courses, key = { it.id + it.beginTime }) { course ->
+        // key 用防撞版本：id 缺失 + 同一时段的课表数据会让 `id+beginTime` 重复，
+        // LazyColumn 直接抛异常 —— 表现为「整页打不开」（见 courseListKeys 说明）。
+        itemsIndexed(state.courses, key = { index, _ -> homeCourseKeys[index] }) { _, course ->
             CourseRow(
                 course = course,
                 selected = state.selected?.id == course.id,
@@ -1487,7 +1493,9 @@ private fun AutoSignCard(state: AppUiState, vm: MainViewModel) {
  */
 @Composable
 private fun AutoSignExcludeCard(state: AppUiState, vm: MainViewModel) {
-    var showPicker by remember { mutableStateOf(false) }
+    // rememberSaveable：旋屏 / 进程重建后弹窗不丢（remember 会在重建时清零，
+    // 用户正选到一半的弹窗凭空消失，看起来就像「点了没反应」）。
+    var showPicker by rememberSaveable { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = Color.White),
         shape = RoundedCornerShape(16.dp),
@@ -1505,6 +1513,15 @@ private fun AutoSignExcludeCard(state: AppUiState, vm: MainViewModel) {
                 color = Color(0xFF0F6B4C),
                 fontWeight = FontWeight.Medium,
             )
+            // 写入失败必须可见：静默失败时用户点开关毫无反应，只会以为应用坏了。
+            state.exclusionNotice?.let { notice ->
+                Text(
+                    notice,
+                    fontSize = 12.sp,
+                    color = Color(0xFFB3261E),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             if (state.courses.isEmpty()) {
                 Text(
                     "今日课程尚未加载：请先在首页点「刷新课程」，再来选择。",
@@ -1544,13 +1561,16 @@ private fun ExcludeCourseDialog(
             if (state.courses.isEmpty()) {
                 Text("今日暂无课程。请先在首页刷新课程后再设置。", fontSize = 13.sp)
             } else {
+                // key 用防撞版本：id 缺失 + 同一时段的数据形态会让旧 key 重复，
+                // 弹窗直接打不开（见 courseListKeys 说明）。
+                val keys = remember(state.courses) { courseListKeys(state.courses) }
                 LazyColumn(
                     // 上限而不是固定高度：课程少时弹窗紧凑，课程多时内部滚动，
                     // 不会把「完成」按钮顶出屏幕。
                     modifier = Modifier.heightIn(max = 420.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(state.courses, key = { it.id + it.beginTime }) { course ->
+                    itemsIndexed(state.courses, key = { index, _ -> keys[index] }) { _, course ->
                         ExcludeCourseRow(course, state, vm)
                     }
                 }
@@ -1630,6 +1650,25 @@ private fun KeepAliveCard(state: AppUiState, vm: MainViewModel) {
             if (ka.daemonBlocked) {
                 Text(
                     stringResource(R.string.keepalive_alert_daemon_blocked),
+                    fontSize = 12.sp,
+                    color = Color(0xFFB42318),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            // 本机时钟偏差：闹钟按本机钟排、timestamp 按学校钟发，本机不准两者一起偏
+            // —— 这是「不同机型上自动签到时好时坏」「时间戳传入异常」的经典成因
+            //（手动改过时间 / 双时钟 ROM / NITZ 没同步）。偏差超 90 秒才提示，
+            // 且只在有校时样本时判定：宁缺毋滥。
+            ka.deviceClockSkewMs?.takeIf { Math.abs(it) > 90_000L }?.let { skew ->
+                val minutes = (Math.abs(skew) / 60_000L).coerceAtLeast(1)
+                Text(
+                    if (skew > 0) {
+                        "本机时钟比学校时间快约 $minutes 分钟：签到闹钟与提交的时间戳都会随之偏移" +
+                            "（「时间戳传入异常」的常见成因）。建议开启系统「自动设置时间」后重试。"
+                    } else {
+                        "本机时钟比学校时间慢约 $minutes 分钟：签到闹钟与提交的时间戳都会随之偏移。" +
+                            "建议开启系统「自动设置时间」后重试。"
+                    },
                     fontSize = 12.sp,
                     color = Color(0xFFB42318),
                     fontWeight = FontWeight.Medium,

@@ -125,4 +125,13 @@ data class KeepAliveState(
     val estimatedWakeupsToday: Int = 0,
     /** 系统是否处于省电模式（只收紧重试预算与小部件秒级重绘，不改用户档位）。 */
     val systemPowerSave: Boolean = false,
+    /**
+     * 本机时钟相对学校时间的偏差（毫秒，正 = 本机快）。
+     *
+     * 闹钟按本机钟排、timestamp 按学校钟发 —— 本机不准时两者一起偏，
+     * 是「不同机型上自动签到时好时坏」的经典成因（手动改过时间 / 双时钟 ROM /
+     * 运营商 NITZ 没同步）。null = 暂无校时样本（未进签到窗口或校时不可用），
+     * 此时不判定 —— 宁可没有结论，不给一个误导性的数字。
+     */
+    val deviceClockSkewMs: Long? = null,
 )

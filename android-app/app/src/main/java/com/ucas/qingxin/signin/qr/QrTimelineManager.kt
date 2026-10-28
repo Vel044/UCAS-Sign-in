@@ -20,6 +20,8 @@ import kotlinx.coroutines.sync.withLock
  */
 class QrTimelineManager(
     private val api: QingxinApiService,
+    /** 校准持久化；null = 不落盘（单测与不关心校准的调用方）。 */
+    private val calibration: ClockCalibrationStore? = null,
 ) {
     data class ClockReading(
         val schoolNowMs: Long,
@@ -77,6 +79,9 @@ class QrTimelineManager(
         sampleSchoolMs = schoolAtReceive
         sampleLocalMs = bestAt
         sampleRttMs = bestRtt
+        // 每次成功校时都刷新持久化校准（学校钟 ↔ 本机钟的偏差）：
+        // 30 秒 TTL 的内存样本过期后，扫码路径靠它做零网络的时间校正。
+        runCatching { calibration?.save(schoolAtReceive, bestAt) }
         ClockReading(
             schoolNowMs = schoolAtReceive,
             ageMs = 0,
@@ -91,6 +96,22 @@ class QrTimelineManager(
         val age = System.currentTimeMillis() - local
         if (age < 0 || age >= QingxinApiService.TIME_SYNC_TTL_MS) return null
         return school + age
+    }
+
+    /**
+     * 按最近一次**持久化校准**推算的学校时间（`本机当前时间 + 偏差`）。
+     *
+     * 与 [currentSchoolTimeOrNull] 的分工：后者是 30 秒 TTL 的**权威**读数
+     * （通知文案、界面时钟都用它）；本方法是校准过期后的**低置信推算**，
+     * 目前只给扫码的 timestamp 判定用（见 `ScanTimestampPolicy` 的
+     * `CALIBRATED_CLOCK`）—— 那里的备选是「发一个陈旧时间戳被拒」或
+     * 「多花一个校时往返」，推算值再不准也优于两者。
+     *
+     * 无校准记录（从未校时 / 超过信任时长）时返回 null。
+     */
+    fun calibratedSchoolNowOrNull(nowMs: Long = System.currentTimeMillis()): Long? {
+        val (schoolMs, localMs) = calibration?.load() ?: return null
+        return nowMs + (schoolMs - localMs)
     }
 
     /**

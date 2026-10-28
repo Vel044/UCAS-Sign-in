@@ -20,6 +20,7 @@ import com.ucas.qingxin.signin.lecture.LectureRepository
 import com.ucas.qingxin.signin.lecture.LectureScheduleStore
 import com.ucas.qingxin.signin.logging.SignLog
 import com.ucas.qingxin.signin.network.QingxinApiService
+import com.ucas.qingxin.signin.qr.ClockCalibrationStore
 import com.ucas.qingxin.signin.qr.QrTimelineManager
 import com.ucas.qingxin.signin.update.UpdateCheckStore
 import com.ucas.qingxin.signin.update.UpdateService
@@ -206,7 +207,7 @@ class QingxinApp : Application() {
         // 讲座通知只依赖公开的人文学院网站数据源，不需要登录态，也不参与签到。
         // 构造不需要 Context：列表**不做本地缓存**，每次刷新都直接抓网页。
         lectureRepository = LectureRepository(LectureNoticeService())
-        qrTimeline = QrTimelineManager(api)
+        qrTimeline = QrTimelineManager(api, ClockCalibrationStore(this))
         attendanceRepository = AttendanceRepository(api, authRepository, courseRepository, qrTimeline, signRecords)
         attendanceScheduler = AttendanceScheduler(this)
         autoSignExclusionStore = AutoSignExclusionStore(this)

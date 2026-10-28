@@ -10,6 +10,7 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -488,6 +489,14 @@ class AttendanceScheduler(context: Context) {
             daemonBlocked = isDaemonBlocked(),
             estimatedWakeupsToday = estimateWakeupsToday(),
             systemPowerSave = profile.systemPowerSave,
+            deviceClockSkewMs = runCatching {
+                val app = appContext as? QingxinApp ?: return@runCatching null
+                if (!app.isReady) return@runCatching null
+                // 只复用现有校时样本（30 秒 TTL），不为此发网络请求：
+                // 没样本就不判定，宁缺毋滥。
+                app.qrTimeline.currentSchoolTimeOrNull()
+                    ?.let { schoolNow -> System.currentTimeMillis() - schoolNow }
+            }.getOrNull(),
         )
     }
 
@@ -601,11 +610,19 @@ class AttendanceScheduler(context: Context) {
          * 刻意放在 companion 并且**只依赖 WorkManager**：容器初始化失败时
          * `app.attendanceScheduler` 可能根本没构造出来（lateinit），实例方法一条都不能碰。
          * WorkManager 走自己的初始化，这条路总能走通。
+         *
+         * 1.4.0 起升格 **expedited**（配 `RUN_AS_NON_EXPEDITED_WORK_REQUEST` 兜底）：
+         * 它的使命是「别被 JobScheduler 的批处理合并拖到窗口之外」，正是 expedited
+         * 的定义域。如实说明一个平台细节：带了 [RECOVERY_DELAY_MS] 初始延迟后，
+         * 部分 API 级别上 expedited 资格不会在延迟结束时保留（平台文档口径不一）——
+         * 最坏退化为与旧版完全相同的行为，无回归； honors 时则是纯收益。
+         * 容器未就绪时 worker 自会 `retry()`，时序语义不变。
          */
         fun enqueueRecovery(context: Context) {
             val appContext = context.applicationContext
             runCatching {
                 val request = OneTimeWorkRequestBuilder<AutoSignRecoveryWorker>()
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                     .setInitialDelay(RECOVERY_DELAY_MS, TimeUnit.MILLISECONDS)
                     .build()
                 WorkManager.getInstance(appContext).enqueueUniqueWork(

@@ -25,8 +25,11 @@ import kotlin.math.abs
  *
  * 1. **二维码新鲜时一个字都不改** —— 与唯一已知可用的客户端逐字一致，
  *    不为一个已经成立的情形引入新变量。
- * 2. **绝不提交本机时间** —— 校时拿不到就退回二维码原值：宁可用一个可能已过期的
- *    *学校*值，也不用一个我们无法证明可信的本地值（本项目自 1.0 起的既有约束）。
+ * 2. **绝不提交未经校准的本机时间** —— 2026-10-28 之前是「绝不提交本机时间」，
+ *    校准机制（`ClockCalibrationStore`）落地后放宽半步：本机时间**加上最近一次
+ *    校时标定的偏差**后，它就是学校时间的一份推算 —— 在「现场校时不可用」时，
+ *    它仍优于「提交一个已知陈旧的学校原值」（必被拒）与「编一个裸本机时间」
+ *    （从不可接受）。校准缺失时本条回到原样：退回二维码原值。
  */
 object ScanTimestampPolicy {
 
@@ -52,33 +55,57 @@ object ScanTimestampPolicy {
     }
 
     /**
-     * 决定提交哪个时间戳；两个可用取值一个都没有时返回 null（调用方只能如实失败）。
+     * 决定提交哪个时间戳；所有可用取值一个都没有时返回 null（调用方只能如实失败）。
+     *
+     * 取值优先级：**现场校时（权威）> 校准推算（低置信）> 二维码原值（不动）**。
      *
      * @param qrTsMs 二维码自带的 `timestamp`（缺失 / 不是数字时为 null）。
      * @param schoolNowMs 本校校时读数；null = 不可用。
+     * @param estimatedSchoolNowMs 按最近校准偏差推算的学校时间
+     *   （本机当前时间 + 偏差，见 `ClockCalibrationStore`）；null = 无校准可用。
+     *   只在 `schoolNowMs` 为 null 时才参与判定。
      */
-    fun resolve(qrTsMs: Long?, schoolNowMs: Long?): Decision? {
+    fun resolve(
+        qrTsMs: Long?,
+        schoolNowMs: Long?,
+        estimatedSchoolNowMs: Long? = null,
+    ): Decision? {
         // 没有可照抄的值：请求只能由我们拼完整 ⇒ 必须带一个新鲜度证明。
-        // 连校时也拿不到时**没有**任何可以提交的东西 —— 本机时间不算（见不变量 2），
-        // 因此返回 null 让调用方如实失败，而不是编一个值出来。
+        // 现场校时不可用时退到校准推算；连校准也没有时返回 null
+        // （裸本机时间从不可提交 —— 见不变量 2 的现行版本）。
         if (qrTsMs == null) {
-            val schoolNow = schoolNowMs ?: return null
+            val schoolNow = schoolNowMs ?: estimatedSchoolNowMs ?: return null
+            val calibrated = schoolNowMs == null
             return Decision(
                 valueMs = schoolNow,
-                fromSchoolClock = true,
+                fromSchoolClock = !calibrated,
                 qrAgeMs = null,
                 qrStale = false,
-                confidence = Decision.Confidence.NO_QR_TIMESTAMP,
+                confidence = if (calibrated) {
+                    Decision.Confidence.CALIBRATED_CLOCK
+                } else {
+                    Decision.Confidence.NO_QR_TIMESTAMP
+                },
             )
         }
-        // 校时不可用 ⇒ 不变量 2：不动二维码原值。
+        // 现场校时不可用：先试校准推算 —— 推算的学校时间足以判「新旧」，
+        // 陈旧就提交推算值，新鲜就照抄二维码原值（与权威路径同构）。
         if (schoolNowMs == null) {
-            return Decision(
+            val estimated = estimatedSchoolNowMs ?: return Decision(
                 valueMs = qrTsMs,
                 fromSchoolClock = false,
                 qrAgeMs = null,
                 qrStale = false,
                 confidence = Decision.Confidence.NO_SCHOOL_CLOCK,
+            )
+            val ageMs = estimated - qrTsMs
+            val fresh = abs(ageMs) <= REPLAY_TOLERANCE_MS
+            return Decision(
+                valueMs = if (fresh) qrTsMs else estimated,
+                fromSchoolClock = !fresh,
+                qrAgeMs = ageMs,
+                qrStale = !fresh,
+                confidence = Decision.Confidence.CALIBRATED_CLOCK,
             )
         }
         val ageMs = schoolNowMs - qrTsMs
@@ -113,6 +140,13 @@ object ScanTimestampPolicy {
         enum class Confidence {
             /** 拿本校校时判定的，结论可信。 */
             SCHOOL_CLOCK,
+
+            /**
+             * 现场校时不可用，按「本机时钟 + 最近校准偏差」推算的学校时间判定。
+             * 低置信：设备时钟在校准之后被改过的话，推算值会整体偏移 ——
+             * 界面的措辞必须如实交代这一点（见 `timestampNoteFor`）。
+             */
+            CALIBRATED_CLOCK,
 
             /** 校时不可用，按「不动二维码原值」处理。 */
             NO_SCHOOL_CLOCK,

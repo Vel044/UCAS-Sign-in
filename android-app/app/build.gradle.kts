@@ -124,12 +124,19 @@ val extraCleartextHosts: List<String> = localPropOrEmpty("ucas.net.extraCleartex
 
 android {
     namespace = "com.ucas.qingxin.signin"
-    compileSdk = 35
+    // compileSdk/targetSdk 36（Android 16，2026-10-28 升级）：
+    // · compileSdk 只影响编译期可见 API，代码未用 36 新 API，风险在构建脚本层
+    //   （AGP 8.7 官方测试上限 35，已用 suppressUnsupportedCompileSdk 抑制提示）；
+    // · targetSdk 36 的主要行为变更：Edge-to-Edge 强制（本应用已全局
+    //   enableEdgeToEdge + Scaffold insets）与预测式返回默认开启
+    //   （manifest 已显式 enableOnBackInvokedCallback="true"），均已在源码层就绪；
+    //   发版前建议在 Android 16 设备过一遍设置页 / 扫码页 / 排除弹窗。
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.ucas.qingxin.signin"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         // versionCode 必须单调递增：任何低于已装版本的数值都会导致无法覆盖安装。
         // 43 → 44：新增「扫码打卡」（相机扫码 + 载荷分类 + 走学校扫码通道提交）。
         // 44 → 45：修 1.3.0 的页头布局 —— 扫码入口挤掉了学号的显示宽度。
@@ -184,9 +191,13 @@ android {
         //           退出打断时回退链半途而废（现场记录 `f0: s0 was cancelled`）。
         //           改为取消穿透 + 引擎通用 catch 放行取消 + 看门狗 18s → 24s
         //           （完整回退链最坏 36 秒）+ 取消类签到记录写人话（判定 CANCELLED）。
-        versionCode = 53
-        // 1.3.8 → 1.3.9：取消安全的时间戳自愈链。
-        versionName = "1.3.9"
+        // 53 → 54：1.4.0（2026-10-28）：API 版本兼容升级（P1）——
+        //           compileSdk/targetSdk 35 → 36（Android 16 对齐）、预测式返回
+        //           （enableOnBackInvokedCallback）、auto_sign_recovery 升格
+        //           expedited；1.3.9 的全链条加固内容全部保留。
+        versionCode = 54
+        // 1.3.9 → 1.4.0：Android 16 对齐（compileSdk/targetSdk 36）+ 预测式返回。
+        versionName = "1.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 端点来自本地 local.properties，绝不硬编码（见文件顶部说明）。
@@ -375,6 +386,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.google.zxing:core:3.5.3")
+    // 相册选图解码：读拍摄照片的 EXIF 旋转角（minSdk 26 不能用 ImageDecoder 的
+    // 自动 EXIF 处理，28+ 才有）。只进 APK 一个小库，无传递依赖。
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     /*
      * 扫码依赖：相机层走 CameraX，不用 Camera1。
      *

@@ -35,6 +35,10 @@ class ScanTimestampPolicyTest {
         localNow: Long = schoolNow ?: (qrTs ?: 0L),
     ) = ScanTimestampPolicy.resolve(qrTs, schoolNow)
 
+    /** 校准推算路径的便捷入口：`estimated` = 本机时间 + 校准偏差。 */
+    private fun resolveWithEstimate(qrTs: Long?, estimated: Long?) =
+        ScanTimestampPolicy.resolve(qrTs, schoolNowMs = null, estimatedSchoolNowMs = estimated)
+
     // ------------------------------------------------- 真机案例：必须不照抄
 
     @Test
@@ -158,6 +162,64 @@ class ScanTimestampPolicyTest {
         val d = resolve(qrTs = realNow - 500L, schoolNow = realNow)!!
         assertFalse(d.qrStale)
         assertEquals(realNow - 500L, d.valueMs)
+    }
+
+    // ------------------------------------------------------------ 校准推算（CALIBRATED_CLOCK）
+
+    @Test
+    fun `现场校时不可用_推算判定码已陈旧_提交推算值`() {
+        val qrTs = 1_000_000L
+        val estimated = qrTs + 224_000L
+        val d = resolveWithEstimate(qrTs, estimated)!!
+        assertTrue(d.qrStale)
+        assertEquals(estimated, d.valueMs)
+        assertTrue(d.fromSchoolClock)
+        assertEquals(224_000L, d.qrAgeMs)
+        assertEquals(Confidence.CALIBRATED_CLOCK, d.confidence)
+    }
+
+    @Test
+    fun `现场校时不可用_推算判定码还新鲜_照抄原值`() {
+        // 与小程序逐字一致的分支不能因为推算介入而改变：码是活的就一个字不改。
+        val qrTs = 1_000_000L
+        val d = resolveWithEstimate(qrTs, qrTs + 1_000L)!!
+        assertFalse(d.qrStale)
+        assertEquals(qrTs, d.valueMs)
+        assertEquals(Confidence.CALIBRATED_CLOCK, d.confidence)
+    }
+
+    @Test
+    fun `裸编号班牌_无现场校时但有校准_用推算值补入`() {
+        // 修复前的行为：这条路上 resolve 返回 null → 直接失败发不出请求。
+        val estimated = 2_000_000L
+        val d = resolveWithEstimate(qrTs = null, estimated = estimated)!!
+        assertEquals(estimated, d.valueMs)
+        assertEquals(Confidence.CALIBRATED_CLOCK, d.confidence)
+    }
+
+    @Test
+    fun `有权威校时的时候推算值绝不参与`() {
+        val qrTs = 1_000_000L
+        val schoolNow = qrTs + 224_000L
+        val d = ScanTimestampPolicy.resolve(
+            qrTs,
+            schoolNowMs = schoolNow,
+            estimatedSchoolNowMs = schoolNow + 999_999L,
+        )!!
+        assertEquals(schoolNow, d.valueMs)
+        assertEquals(Confidence.SCHOOL_CLOCK, d.confidence)
+    }
+
+    @Test
+    fun `校时与校准都不可用时维持原样_照抄二维码原值`() {
+        val d = resolveWithEstimate(qrTs = 1_000_000L, estimated = null)!!
+        assertEquals(1_000_000L, d.valueMs)
+        assertEquals(Confidence.NO_SCHOOL_CLOCK, d.confidence)
+    }
+
+    @Test
+    fun `裸编号班牌_校时与校准都不可用才失败`() {
+        assertNull(resolveWithEstimate(qrTs = null, estimated = null))
     }
 
     // ------------------------------------------------------------ 措辞
