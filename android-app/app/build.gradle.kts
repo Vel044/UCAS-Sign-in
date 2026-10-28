@@ -179,9 +179,14 @@ android {
         //           自动改走（仅 7 位编号）；② 签到记录时间升为毫秒精度（.SSS），
         //           支撑时间轴对齐实验（§10.25）。1.3.7 与其云端发布版一致，
         //           本轮内容不再并入。
-        versionCode = 52
-        // 1.3.7 → 1.3.8：备选签到通道（stu_auto_sign）+ 毫秒级签到记录。
-        versionName = "1.3.8"
+        // 52 → 53：1.3.9（2026-10-28）：修自愈链被协程取消静默腰斩 ——
+        //           runCatching 会连 CancellationException 一起吞掉，看门狗/守护
+        //           退出打断时回退链半途而废（现场记录 `f0: s0 was cancelled`）。
+        //           改为取消穿透 + 引擎通用 catch 放行取消 + 看门狗 18s → 24s
+        //           （完整回退链最坏 36 秒）+ 取消类签到记录写人话（判定 CANCELLED）。
+        versionCode = 53
+        // 1.3.8 → 1.3.9：取消安全的时间戳自愈链。
+        versionName = "1.3.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 端点来自本地 local.properties，绝不硬编码（见文件顶部说明）。

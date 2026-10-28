@@ -96,8 +96,16 @@ class AutoSignAlarmReceiver : BroadcastReceiver() {
         /** 窗口内补签槽（1.3.7 起）的动作。与签到槽同走 [onSignWindow]。 */
         const val ACTION_AUTO_SIGN_SWEEP = "com.ucas.qingxin.signin.action.AUTO_SIGN_SWEEP"
 
-        /** 硬超时：`goAsync()` 不能长时间占用，超时后立刻归还控制权。 */
-        private const val WATCHDOG_MS = 18_000L
+        /**
+         * 硬超时：`goAsync()` 不能长时间占用，超时后立刻归还控制权。
+         *
+         * 24 秒的账：单次签到请求超时 10 秒、校时 6 秒，1.3.8 的时间戳自愈链
+         * 最坏要「请求 + 强制校时 + 重试 + 备选通道」= 36 秒 —— 18 秒装不下，
+         * 慢网络下回退链会在中途被砍（2026-10-28 现场记录的取消正是这类打断）。
+         * 24 秒仍留有 `goAsync` 的余量（后台广播预算远大于此），且绝大多数现场
+         * 单请求 1~3 秒，链全程 5~10 秒内完成，超时只兜真正的网络异常。
+         */
+        private const val WATCHDOG_MS = 24_000L
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }

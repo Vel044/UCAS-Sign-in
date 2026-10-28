@@ -9,6 +9,7 @@ import com.ucas.qingxin.signin.data.SignOutcome
 import com.ucas.qingxin.signin.network.ApiException
 import com.ucas.qingxin.signin.widget.TodayCourseWidgetReceiver
 import com.ucas.qingxin.signin.widget.WidgetRefreshScheduler
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -221,6 +222,11 @@ internal object AutoSignEngine {
                 return EngineOutcome.NEED_LOGIN
             }
             return EngineOutcome.RETRY
+        } catch (e: CancellationException) {
+            // 看门狗超时 / 守护服务退出的取消必须穿透：吞掉它会让已取消的协程
+            // 继续走 RETRY 节奏（下一次 delay 立刻再抛），还把一次「中断」误记成
+            // 「可重试的失败」。取消的语义交给上层（withTimeoutOrNull / 作用域）。
+            throw e
         } catch (_: Exception) {
             return EngineOutcome.RETRY
         }

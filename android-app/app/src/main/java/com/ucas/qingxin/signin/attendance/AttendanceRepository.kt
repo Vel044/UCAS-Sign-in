@@ -12,6 +12,7 @@ import com.ucas.qingxin.signin.history.SignSource
 import com.ucas.qingxin.signin.network.ApiException
 import com.ucas.qingxin.signin.network.QingxinApiService
 import com.ucas.qingxin.signin.qr.QrTimelineManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -201,6 +202,11 @@ class AttendanceRepository(
             throw e
         } catch (e: Exception) {
             // 非 ApiException（如取消）：也留一条，否则历史里会出现「点了一次但什么都没发生」。
+            // 取消单独写人话：发布包混淆后 JobCancellationException 的类名是「f0」这类
+            // 乱码（2026-10-28 现场记录 `f0: s0 was cancelled`），不翻译根本没法归因；
+            // 它的真实含义是「看门狗超时 / 服务退出在请求途中打断了这次尝试」，
+            // 与学校的拒绝是两回事。
+            val cancelled = e is CancellationException
             records.append(
                 SignRecord(
                     atMs = System.currentTimeMillis(),
@@ -208,9 +214,13 @@ class AttendanceRepository(
                     code = code,
                     kind = kind,
                     ok = false,
-                    message = "${e::class.java.simpleName}: ${e.message ?: ""}",
+                    message = if (cancelled) {
+                        "本次尝试被超时看门狗打断（窗口内会自动重试）"
+                    } else {
+                        "${e::class.java.simpleName}: ${e.message ?: ""}"
+                    },
                     raw = raw,
-                    outcome = e::class.java.simpleName,
+                    outcome = if (cancelled) "CANCELLED" else e::class.java.simpleName,
                     note = note,
                 ),
             )
@@ -301,17 +311,32 @@ class AttendanceRepository(
             // 问题在构造上不存在。仅 7 位节次编号可用（该通道只有这一个标识参数），
             // 坐标为项目所有者授权的校区固定值（见 QingxinApiService.submitAutoSign）。
             // 任一失败都如实返回最接近的一次结果：它带着学校的原话，最能说明问题。
+            //
+            // 2026-10-28 修正：这两步**不能**用 `runCatching` 包裹 —— 它会连
+            // CancellationException 一起吞掉：闹钟看门狗（18 秒）或守护服务退出
+            // 取消协程时，回退链被静默腰斩（现场记录 `f0: s0 was cancelled` 正是
+            // 被混淆的 JobCancellationException），且已取消的协程还会带着取消状态
+            // 继续发后面的请求。取消必须**立刻穿透**；普通异常才按「这一步失败」
+            // 处理、落到下一步或如实返回 first。
             if (first.outcome == SignOutcome.TIMESTAMP_REJECTED) {
-                val retried = runCatching {
+                val retried = try {
                     val fresh = qrTimeline.syncClock(force = true).schoolNowMs
                     api.submitAttendance(session, courseKey, fresh)
-                }.getOrNull()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
                 when {
                     retried != null && retried.outcome != SignOutcome.TIMESTAMP_REJECTED ->
                         return retried
-                    QingxinApiService.isSevenDigitId(courseKey) -> runCatching {
-                        api.submitAutoSign(session, courseKey)
-                    }.getOrNull()?.let { return it }
+                    QingxinApiService.isSevenDigitId(courseKey) -> try {
+                        return api.submitAutoSign(session, courseKey)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // 备选通道网络失败：落到底部如实返回 first（带学校原话）。
+                    }
                 }
                 return retried ?: first
             }
