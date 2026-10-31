@@ -372,6 +372,14 @@ internal class WidgetRefreshWorker(
         runCatching { TodayCourseWidgetReceiver.requestUpdate(applicationContext) }
         // 数据成功就按最新课表重排边界闹钟；失败则保留原心跳频率以便尽快重试。
         if (loggedIn) runCatching { WidgetRefreshScheduler.rescheduleAlarm(applicationContext) }
+
+        // 顺带重排自动签到的闹钟链（1.3.7 起）：本任务是小时级的周期工作，
+        // 进程被拉起来的这一刻正好用来「自愈」—— ROM / 电池策略若掐掉了
+        // 签到闹钟，最多一个周期后就会在这里被重新接上，用户无感。
+        // startDaemon = false：worker 没有前台服务的临时豁免（见 AttendanceScheduler.ensureSchedule）。
+        if (loggedIn && app!!.attendanceScheduler.getSettings().autoSignEnabled) {
+            runCatching { app.attendanceScheduler.ensureSchedule(startDaemon = false) }
+        }
         return Result.success()
     }
 }

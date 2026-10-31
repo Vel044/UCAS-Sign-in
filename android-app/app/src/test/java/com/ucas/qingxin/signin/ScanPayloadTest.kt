@@ -84,8 +84,9 @@ class ScanPayloadTest {
         assertEquals("", payload.query)
         assertEquals("1234567", payload.signCode.courseSchedId)
         assertNull(payload.qrHost)
-        // 没有 timestamp 可沿用，因此需要调用方补一个校时。
-        assertTrue(payload.needsTimestamp)
+        // 没有 timestamp 可沿用，也没有可照抄的值 ⇒ 取值只能来自本校校时
+        // （ScanTimestampPolicy 的 NO_QR_TIMESTAMP 那一支）。
+        assertNull(payload.qrTimestampMs)
         assertEquals("courseSchedId=1234567", payload.submitQuery)
     }
 
@@ -105,26 +106,49 @@ class ScanPayloadTest {
     // ------------------------------------------------------------------ 校时
 
     @Test
-    fun `二维码带 timestamp 时_不用本机校时覆盖它`() {
+    fun `withTimestampOf 替换已有值_且不动其余参数`() {
         val payload = direct("app/course/stu_scan_sign.action?courseSchedId=1234567&timestamp=1756000000000")
-        assertFalse(payload.needsTimestamp)
-        // 即使传进来一个完全不同的校时值，也必须保持二维码原值：这条通道
-        // 因此**不依赖本机时钟**，与小程序一致。
-        assertEquals(payload.submitQuery, payload.withTimestamp(1L))
-        assertTrue(payload.withTimestamp(1L).contains("timestamp=1756000000000"))
+        assertEquals(
+            "courseSchedId=1234567&timestamp=1756999999999",
+            payload.withTimestampOf(1756999999999L),
+        )
     }
 
     @Test
-    fun `二维码没带 timestamp 时_原样重放而不代学校补`() {
-        // 这是 1.3.1 的实测失败点：班牌给的 query 里没有 timestamp，
-        // 而轻新课堂只做 `二维码query + "&id=" + uid`，从不新增时间戳。
-        // 多补一个值是**本项目独有的**改动，必须去掉（见 DirectSign.needsTimestamp）。
+    fun `withTimestampOf 对没有时间戳的请求是追加`() {
+        // 整段原文只是一个裸编号时，请求本来就由我们拼完整：这里必须**补**上，
+        // 否则发出去的请求连一个新鲜度证明都没有，必然被拒。
+        assertEquals("courseSchedId=1234567&timestamp=5", direct("1234567").withTimestampOf(5L))
+        // 二维码带 query 但没带时间戳的班牌同样如此。
+        assertEquals(
+            "courseSchedId=1234567&timestamp=5",
+            direct("app/course/stu_scan_sign.action?courseSchedId=1234567").withTimestampOf(5L),
+        )
+    }
+
+    @Test
+    fun `qrTimestampMs 把自带时间戳解释成数字_不是数字时给 null`() {
+        assertEquals(
+            1756000000000L,
+            direct("app/course/stu_scan_sign.action?courseSchedId=1234567&timestamp=1756000000000")
+                .qrTimestampMs,
+        )
+        assertNull(direct("app/course/stu_scan_sign.action?courseSchedId=1234567").qrTimestampMs)
+        // 学校那侧要是塞了一个非数字（没人见过，但不能因此崩），当作「没带」处理。
+        assertNull(
+            direct("app/course/stu_scan_sign.action?courseSchedId=1234567&timestamp=abc").qrTimestampMs,
+        )
+    }
+
+    @Test
+    fun `二维码没带 timestamp 时_本层不擅自决定取值`() {
+        // 小程序对「码里没有 timestamp」只做 `二维码query + "&id=" + uid`，从不新增；
+        // 本层因此只**如实报告**没有自带值，「要不要改用校时」交给 ScanTimestampPolicy
+        // 统一判 —— 它同时管着「自带的那个值是不是已经陈旧」，两处规则必须同源。
         val payload = direct("app/course/stu_scan_sign.action?courseSchedId=1234567")
         assertTrue(payload.isReplay)
-        assertFalse(payload.needsTimestamp)
+        assertNull(payload.qrTimestampMs)
         assertEquals("courseSchedId=1234567", payload.submitQuery)
-        // 即使调用方硬塞一个校时值，也必须原样不改。
-        assertEquals(payload.submitQuery, payload.withTimestamp(42L))
     }
 
     @Test
@@ -133,17 +157,16 @@ class ScanPayloadTest {
         // 因此这里**不需要**任何本地课表信息。
         val payload = direct("app/course/stu_scan_sign.action?timeTableId=$hex32")
         assertEquals("32 位二维码标识", payload.label)
-        assertFalse(payload.needsTimestamp)
         assertEquals("timeTableId=$hex32", payload.submitQuery)
     }
 
     @Test
     fun `裸编号才由我们拼请求_这时才补时间戳`() {
-        // 没有 query 可重放 ⇒ 请求只能由我们拼完整 ⇒ 必须带新鲜度证明。
+        // 没有 query 可重放 ⇒ 请求只能由我们拼完整 ⇒ 必须带新鲜度证明（补的时间戳）。
         val payload = direct("1234567")
         assertFalse(payload.isReplay)
-        assertTrue(payload.needsTimestamp)
-        assertEquals("courseSchedId=1234567&timestamp=42", payload.withTimestamp(42L))
+        assertNull(payload.qrTimestampMs)
+        assertEquals("courseSchedId=1234567&timestamp=42", payload.withTimestampOf(42L))
     }
 
     @Test

@@ -12,7 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -61,6 +60,31 @@ class QingxinApiService(
         const val QR_REFRESH_CAP_MS = 5_000L
         /** 签到二维码自动锁定：开课前 25 分钟至下课前。 */
         const val SIGN_WINDOW_LEAD_MS = 25L * 60L * 1000L
+
+        /**
+         * 学校原话是否为「timestamp 参数异常」的专项拒绝（2026-10-22 现场记录：
+         * `时间戳传入异常！`，`ERRCODE=100`）。
+         *
+         * 抽成纯函数供单测钉住判据 —— 判据只有一个词「时间戳」，但这个词承载着
+         * 完全不同的自愈动作（强制重取校时并立刻重试，见 `performSign`），
+         * 误判成别的桶会丢掉那次自愈。
+         */
+        fun isTimestampRejected(schoolMessage: String): Boolean =
+            schoolMessage.contains("时间戳")
+
+        /**
+         * 是否为 7 位节次编号 —— [submitAutoSign] 只吃这个形态（32 位标识没有参数名可用）。
+         * 供提交层的通道选择（`AttendanceRepository.performSign`）与单测共用。
+         */
+        fun isSevenDigitId(courseIdOrUuid: String): Boolean =
+            SEVEN_DIGIT_ID.matches(courseIdOrUuid.trim())
+
+        /**
+         * 备选通道的固定坐标（GCJ-02）：雁栖湖校区中心，项目所有者 2026-10-24 授权。
+         * 见 [submitAutoSign] 的定位取值说明。
+         */
+        const val AUTO_SIGN_LONGITUDE = "116.6762"
+        const val AUTO_SIGN_LATITUDE = "40.4086"
 
         /** `yyyyMMdd` 的长度，用于判定日期字段是否可用。 */
         private const val DAY_KEY_LENGTH = 8
@@ -249,6 +273,52 @@ class QingxinApiService(
     }
 
     /**
+     * 备选签到通道：`course/stu_auto_sign.action`（**无 timestamp**）。
+     *
+     * ## 形态（v65 小程序逐字核对，2026-10-24，`docs/lecture-signin-research.md` §10.24）
+     * 挂在 iClass 主机（`schoolServiceURL`，本校可达），POST 表单体：
+     * `{id, courseSchedId, routerInfo(BSSID), longitude, latitude, machineInfo}`，
+     * 成功判据小程序只看 `STATUS == "0"`。**时间戳参数不存在** —— 窗口由服务端
+     * 用它自己的钟判定，因此这条通道天然免疫 §10.23 的「时间戳传入异常」。
+     *
+     * ## 定位取值（项目所有者书面授权的固定值）
+     * 参照客户端（小程序）对这条通道有**定位硬闸**：未授权位置 / 定位未开就拒绝发送，
+     * 从不发送回退坐标 —— 因此本应用发送的是**用户授权的校区固定坐标**
+     * （雁栖湖校区中心，GCJ-02，与小程序 `wx.getLocation({type:"gcj02"})` 同一坐标系），
+     * 代替真实 GPS。这不是参照客户端自己的任何真实形态，属于本项目在用户明确授权下的
+     * 主动取舍；坐标值可在 companion 常量处随时修正。
+     *
+     * `routerInfo`（WiFi BSSID）参照客户端取自 `getConnectedWifi`，未连 WiFi 时为空 ——
+     * 这里固定发空串；`machineInfo` 参照客户端发 `"iOS"` / `"Android"` 平台串。
+     */
+    suspend fun submitAutoSign(
+        session: SchoolSession,
+        courseSchedId: String,
+    ): SignResult = withContext(Dispatchers.IO) {
+        val json = executeJsonLogged(
+            Request.Builder()
+                .url(BASE_URL + "course/stu_auto_sign.action")
+                .header("User-Agent", USER_AGENT)
+                .header("Cache-Control", "no-store")
+                .header("sessionId", session.sessionId)
+                .post(
+                    FormBody.Builder()
+                        .add("id", session.userId)
+                        .add("courseSchedId", courseSchedId.trim())
+                        .add("routerInfo", "")
+                        .add("longitude", AUTO_SIGN_LONGITUDE)
+                        .add("latitude", AUTO_SIGN_LATITUDE)
+                        .add("machineInfo", "Android")
+                        .build(),
+                )
+                .build(),
+            timeoutSec = 10,
+            source = "备选通道（stu_auto_sign，无时间戳，固定校区坐标）",
+        )
+        parseSignResult(json, requireStuSignStatus = false)
+    }
+
+    /**
      * 发一次请求并记日志，返回解析后的 JSON。
      *
      * 日志写在**这里**而不是各个调用点：这样「请求地址 + 响应正文 + 判定结果」
@@ -312,69 +382,71 @@ class QingxinApiService(
     }
 
     /**
-     * 扫码签到：把二维码里读到的参数**原样**提交。
+     * 扫码签到：把二维码里读到的参数**原样**提交，身份走表单体。
      *
-     * ## 与小程序逐字对齐
-     * `cliclScanCode` 命中 `app/course/stu_scan_sign.action` 之后做的是：
-     * 取 `?` 之后的 query → 拼到自己学校的域名下 → 追加 `&id=<uid>` → **POST**
-     * （空表单体）→ 以 `STATUS == "0"` 判成功。这里三点全部照做：
+     * ## 与小程序逐字对齐（「我的」页 `scanBtnClick`，本校唯一可达的扫码签到入口）
+     * 小程序解包（v65，2026-10-20，`docs/lecture-signin-research.md` §10.22）确认它有
+     * **三个**扫码入口，其中两个在本校**根本走不到**：
      *
-     * 1. **POST 而不是 GET**。一键签到（[submitAttendance]）走 GET，那是原版
-     *    RememberSignIn 的形态；扫码这条通道小程序用的是 POST。两者在本项目里
-     *    各自保留，谁也不要「统一」成对方 —— 同一个学校对不同历史实现的兼容程度不同，
-     *    把已验证过的请求形态改掉是在拿唯一稳定的参照物冒险。
-     * 2. **`timestamp` 不新增**：二维码带了就原样带着，二维码没带就**不补**
-     *    （见 `ScanPayload.DirectSign.needsTimestamp`）。小程序这一步只有
-     *    `二维码query + "&id=" + uid`，从不写时间戳；1.3.1 曾在这里自行补一个，
-     *    已按「不偏离唯一已知可用的客户端」改掉（`docs/lecture-signin-research.md` §10.16）。
-     * 3. **`id` 用本次登录用户自己的** —— 小程序的 `userInfo.uid` 与我们的
-     *    `session.userId` 是同一个字段。
+     * - 首页 `cliclScanCode` → `gotoSignWithUrl`（query + `&id=<uid>`，**空表单体**）——
+     *   它所在的页面 `ALightClassesProIndex` 在 `coursePlatformHttpsUrl` 为空时
+     *   直接 `reLaunch` 回登录页，而本校这两个字段都是空（§10.18）。
+     *   **1.3.0–1.3.5 逐字复刻的正是这条从未在本校发出过的形态**，这是本轮修复的根因。
+     * - `OpenScanQRcode` 把 query 存进 `scanCodeResult`，交给 H5 课程平台页消费——
+     *   消费方页面同样进不去。
+     * - **「我的」页 `scanBtnClick`（本函数对齐的对象）**：
+     *   `schoolServiceURL + "app/course/stu_scan_sign.action?" + <二维码 query 原样>`，
+     *   `requestPost` 以 `application/x-www-form-urlencoded` POST
+     *   **表单体 `{id, longitude, latitude}`**，以 `STATUS == "0"` 判成功。
      *
-     * ## 与小程序唯一的**故意**差异：域名
-     * 二维码若带完整 url，小程序会丢掉它的域名、只用自己配置的学校域名；这里同样丢掉，
-     * 理由不止「保持一致」——`sessionId` 是 [BASE_URL] 这台服务器签发的，
-     * 发到别的域名上必然认证失败，而且等于把会话凭据主动送给二维码里随便写的域名。
-     * 因此传进来的地址必须是**已经落在 [BASE_URL] 上**的（见 [buildScanUrl]）。
+     * 三个照做点与一个保留差异：
+     *
+     * 1. **POST 表单体带 `id`**：`id` 在体里、不在 query 上（query 里一个参数都不加）。
+     *    `id = userInfo.result.id` 与我们的 [SchoolSession.userId] 同源
+     *    （登录响应 `result.id`，见 [parseSession]）。
+     * 2. **`longitude` / `latitude` 提交字面量 `"0"`**：这是小程序**未获定位权限时自己的
+     *    回退值**（`fail: n="0", a="0"`），不是我们伪造的坐标 —— 本项目依旧不申请
+     *    定位权限、不读任何位置信息，只是把参照客户端的「无定位模式」原样发出。
+     * 3. **`timestamp` 由调用方按新鲜度决定**：二维码自带的值还够新就照抄，
+     *    已陈旧（班牌不再刷新 / 班牌时钟偏了）就改用本校校时 ——
+     *    判定在 `com.ucas.qingxin.signin.attendance.ScanTimestampPolicy`。
+     *    小程序这一步从不写时间戳，因为它总是当场读屏、到手的码永远新鲜；
+     *    我们的用户可能面对一块不再刷新的班牌（真机实测：时间戳已过去 224 秒），
+     *    照抄必然被拒。
+     *    详见 `docs/lecture-signin-research.md` §10.16（1.3.2 的反向修法）与 §10.19（结论）。
+     * 4. **域名仍一律用 [BASE_URL]**：二维码若带完整 url，两个入口都会丢掉它的域名、
+     *    只用自己配置的学校域名；这里同样丢掉，理由不止「保持一致」——
+     *    `sessionId` 是 [BASE_URL] 这台服务器签发的，发到别的域名上必然认证失败，
+     *    而且等于把会话凭据主动送给二维码里随便写的域名。
+     *    因此传进来的地址必须是**已经落在 [BASE_URL] 上**的（见 [buildScanUrl]）。
+     *
+     * 头部差异如实记录：小程序另带 `Cookie` 与 `Authorization`；本项目没有这两样凭据，
+     * 只带 `sessionId` —— 一键签到（[submitAttendance]）已证明 `sessionId` 单独足够通过认证。
      */
     suspend fun submitScanSign(session: SchoolSession, path: String, query: String): SignResult =
         withContext(Dispatchers.IO) {
-            val url = withOwnUserId(buildScanUrl(path, query), session.userId)
+            val url = buildScanUrl(path, query)
             val json = executeJsonLogged(
                 Request.Builder()
                     .url(url)
                     .header("User-Agent", USER_AGENT)
                     .header("Cache-Control", "no-store")
                     .header("sessionId", session.sessionId)
-                    // 空表单体 + `application/x-www-form-urlencoded`：这正是小程序的
-                    // `requestPost(url, null, {})`（缺省 content-type 同为表单）。
-                    .post(FormBody.Builder().build())
+                    // 表单体带 id/经纬度（经纬度为 "0"）：小程序「我的」页
+                    // `requestPost(url, null, {id, longitude, latitude})` 的形态。
+                    .post(
+                        FormBody.Builder()
+                            .add("id", session.userId)
+                            .add("longitude", "0")
+                            .add("latitude", "0")
+                            .build()
+                    )
                     .build(),
                 timeoutSec = 10,
-                source = "扫码打卡（POST 空表单体）",
+                source = "扫码打卡（表单体带 id，参照小程序「我的」页）",
             )
             parseSignResult(json, requireStuSignStatus = false)
         }
-
-    /**
-     * 追加本次登录用户自己的 `id`。
-     *
-     * 与小程序一样是「在末尾追加 `&id=`」，但**先清掉二维码里可能自带的 `id`**：
-     * 小程序的 `url + "&id=" + uid` 在遇到恶意二维码（`…&id=<别人的 uid>`）时，
-     * 服务端取到哪一个取决于它自己的解析实现 —— 这属于用户**完全无法察觉**的错签。
-     * 用 [okhttp3.HttpUrl.Builder.setQueryParameter] 是同名覆盖，正常二维码
-     * （本来就不带 id）的行为与小程序的字符串拼接完全一致。
-     */
-    private fun withOwnUserId(rawUrl: String, userId: String): String {
-        val parsed = rawUrl.toHttpUrlOrNull()
-        if (parsed != null) {
-            return parsed.newBuilder().setQueryParameter("id", userId).build().toString()
-        }
-        // 退化路径：地址不合法到连 HttpUrl 都解析不出来（几乎不会发生，
-        // 因为传来的地址是我们自己用 BASE_URL 拼的）。仍然尽力剔除自带的 id。
-        val cleaned = rawUrl.replace(Regex("""[?&]id=[^&#]*"""), "").trimEnd('&', '?')
-        val sep = if (cleaned.contains('?')) "&" else "?"
-        return cleaned + sep + "id=" + userId
-    }
 
     /**
      * 「7 位节次 ID / 32 位课表 UUID」→ 学校接口的查询参数名与取值。
@@ -485,12 +557,17 @@ class QingxinApiService(
         ).matcher(msg).find()
         val outside = Pattern.compile("未在上课时间|不在.*签到时间|不是上课时间|未选.*课|不属于.*课|已签到|重复签到")
             .matcher(msg).find()
+        // 学校对 timestamp 参数的专项拒绝（实测原话「时间戳传入异常！」，ERRCODE=100）。
+        // 判据只认这句原话里稳定的那个词：已知的其它拒绝（用户不存在 / 请使用扫码签到 /
+        // 当前时间不是上课时间）都不含「时间戳」。
+        val timestampRejected = isTimestampRejected(msg)
         // 「学校明确拒绝了这次签到」的形态：STATUS 说成功，但它自己给的签到状态不是 1。
         // 仅在要求该字段的通道上有意义（见 requireStuSignStatus 的说明）。
         val rejectedBySignStatus = status == "0" && stuSignStatus.isNotBlank() && stuSignStatus != "1"
 
         val outcome = when {
             expired -> SignOutcome.QR_EXPIRED
+            timestampRejected -> SignOutcome.TIMESTAMP_REJECTED
             status == "0" && (errCode.isBlank() || errCode == "0") &&
                 (!requireStuSignStatus || stuSignStatus == "1") &&
                 (!root.has("success") || root.optBoolean("success", true)) -> SignOutcome.SIGNED
@@ -501,6 +578,7 @@ class QingxinApiService(
         val message = when (outcome) {
             SignOutcome.SIGNED -> "签到成功"
             SignOutcome.QR_EXPIRED -> "学校提示签到码已失效，请刷新后重试"
+            SignOutcome.TIMESTAMP_REJECTED -> "学校判定提交的时间戳异常（已自动重新校时重试）"
             SignOutcome.OUTSIDE_SIGN_WINDOW -> when {
                 msg.contains("已签到") || msg.contains("重复签到") -> "学校提示已签到，请刷新课程状态"
                 msg.contains("未选") || msg.contains("不属于") -> "学校提示当前身份未选此课程"
@@ -515,6 +593,9 @@ class QingxinApiService(
             status = status,
             errCode = errCode,
             stuSignId = result.optString("stuSignId"),
+            // 学校原话单独留一份：`message` 是给我们翻译后的人话，
+            // 而「学校到底在拒绝什么」只能从这句原文里读出来（见 SignResult.schoolMessage）。
+            schoolMessage = msg,
         )
     }
 

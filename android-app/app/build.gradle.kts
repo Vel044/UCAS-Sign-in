@@ -124,20 +124,80 @@ val extraCleartextHosts: List<String> = localPropOrEmpty("ucas.net.extraCleartex
 
 android {
     namespace = "com.ucas.qingxin.signin"
-    compileSdk = 35
+    // compileSdk/targetSdk 36（Android 16，2026-10-28 升级）：
+    // · compileSdk 只影响编译期可见 API，代码未用 36 新 API，风险在构建脚本层
+    //   （AGP 8.7 官方测试上限 35，已用 suppressUnsupportedCompileSdk 抑制提示）；
+    // · targetSdk 36 的主要行为变更：Edge-to-Edge 强制（本应用已全局
+    //   enableEdgeToEdge + Scaffold insets）与预测式返回默认开启
+    //   （manifest 已显式 enableOnBackInvokedCallback="true"），均已在源码层就绪；
+    //   发版前建议在 Android 16 设备过一遍设置页 / 扫码页 / 排除弹窗。
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.ucas.qingxin.signin"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         // versionCode 必须单调递增：任何低于已装版本的数值都会导致无法覆盖安装。
         // 43 → 44：新增「扫码打卡」（相机扫码 + 载荷分类 + 走学校扫码通道提交）。
         // 44 → 45：修 1.3.0 的页头布局 —— 扫码入口挤掉了学号的显示宽度。
         // 45 → 46：扫码失败时把「二维码原文 / 本次提交」摊给用户看；去掉扫码通道
         //           多补的 timestamp（改为纯重放）；新增「签到日志」（设置里可查看/分享/保存）。
-        versionCode = 46
-        // 1.3.1 → 1.3.2：扫码通道只去掉一处多余的参数，其余是新的诊断能力。
-        versionName = "1.3.2"
+        // 46 → 47：新增「签到记录」（用户可读的签到历史，按天分组、可分享）；
+        //           扫码加「连扫」模式与「输入编号」出口。
+        // 47 → 48：扫码的 timestamp 改由 ScanTimestampPolicy 判定：二维码自带的值
+        //           还新鲜就照抄，已陈旧（班牌不再刷新 / 班牌时钟偏）就改用本校校时；
+        //           签到记录补记「判定结果」与「参数来源」，现场失败可离线归因。
+        // 48 → 49：修「扫码识别过慢」（真机反馈驱动）：解码从「逐帧把 11 种一维码 +
+        //           5 种二维码制全试一遍」收窄为**只认二维码**（实测失败帧便宜约 5 倍），
+        //           连续 30 帧认不出来再放宽到全部码制兜底；修连扫模式「第一次之后就
+        //           再也不分析」的库内开关 bug；连扫改为默认开、成功即收工；
+        //           新增补光开关与「识别耗时」实测读数。
+        // 49 → 50：修「时间戳已经新鲜了，学校仍说不在签到时间」（第二份真机记录驱动）：
+        //           二维码只给 32 位标识时，若本机课表能证明是同一节课，就把它的 7 位
+        //           节次号一并补进 query（补在最前，原值保留）；证明不了则不改一个字节。
+        //           同时不再吞掉学校的原话 —— 失败记录/结果卡片/日志都分开写
+        //           「我们的判定」与「学校原话（STATUS/ERRCODE）」，现场失败可离线归因。
+        //           再修请求形态（小程序 v65 解包驱动，§10.22）：此前复刻的首页扫码入口
+        //           在本校根本不可达；改对齐「我的」页 scanBtnClick —— id/经纬度放进
+        //           表单体（经纬度为小程序自己的无定位回退值 "0"），query 一个参数不加。
+        // 50 → 51：后台自动签到可靠性加固（用户反映「常常不能自动签到」驱动）。
+        //           根因是三条「失败后无人再来」的静默丢失带：① 随机时刻已过但窗口
+        //           未关时，一次瞬时失败 → ensureSchedule 走「今日无事」分支全清闹钟，
+        //           该课次连「错过窗口」通知都不会有；② 能精确唤醒的用户 WorkManager
+        //           存在为零，白天闹钟被 ROM / 电池策略掐掉后没有任何自愈通道；
+        //           ③ 接收器在容器未就绪时直接丢弃唤醒。修复 = SWEEP 补签闹钟槽
+        //           （3 分钟一拍、确定性触发点、失败才付费）+ post-mortem 收尾任务
+        //           （补终态通知 + 重排后续）+ 安全网周期任务（随档位、gate 进退）
+        //           + widget 周期任务顺带重排签到闹钟；happy path 每节课仍 2 次唤醒。
+        //           同版补入（用户反馈「没有通知 / 实签偏晚」驱动）：① 前置提醒的
+        //           迟到兜底 —— 提醒闹钟被 Doze 推迟、醒来时随机时刻刚过也补发，
+        //           不再整窗无提醒；② 「核对发现已签到」的收尾路径补发成功通知，
+        //           消灭「记录里签上了、通知栏一片安静」；③ 主页新增自动签到结果行
+        //           并订阅课程数据流，签成后「已签到」角标实时跟上；④ 窗口内重试
+        //           改「先快后慢」（前两拍 3–5 秒，其后 60–90 秒）—— 瞬时失败
+        //           几秒内补成，实签时刻不再比随机时刻晚一两分钟。
+        //           再补（第三份现场记录驱动）：学校判「时间戳传入异常」（ERRCODE=100）
+        //           的根因是校时样本偶发偏移（高 RTT 的 NTP 修正把校时推向未来）。
+        //           修法 = 校时取样取 RTT 最低且修正封顶 1.5s + 识别该拒绝为
+        //           TIMESTAMP_REJECTED 并强制重校时立刻重试一次（详见
+        //           docs/lecture-signin-research.md §10.23）。
+        // 51 → 52：1.3.8（2026-10-24，所有者授权轮）：① stu_auto_sign 备选通道 ——
+        //           无 timestamp、固定校区坐标（雁栖湖），在两段校时重试仍被拒后
+        //           自动改走（仅 7 位编号）；② 签到记录时间升为毫秒精度（.SSS），
+        //           支撑时间轴对齐实验（§10.25）。1.3.7 与其云端发布版一致，
+        //           本轮内容不再并入。
+        // 52 → 53：1.3.9（2026-10-28）：修自愈链被协程取消静默腰斩 ——
+        //           runCatching 会连 CancellationException 一起吞掉，看门狗/守护
+        //           退出打断时回退链半途而废（现场记录 `f0: s0 was cancelled`）。
+        //           改为取消穿透 + 引擎通用 catch 放行取消 + 看门狗 18s → 24s
+        //           （完整回退链最坏 36 秒）+ 取消类签到记录写人话（判定 CANCELLED）。
+        // 53 → 54：1.4.0（2026-10-28）：API 版本兼容升级（P1）——
+        //           compileSdk/targetSdk 35 → 36（Android 16 对齐）、预测式返回
+        //           （enableOnBackInvokedCallback）、auto_sign_recovery 升格
+        //           expedited；1.3.9 的全链条加固内容全部保留。
+        versionCode = 54
+        // 1.3.9 → 1.4.0：Android 16 对齐（compileSdk/targetSdk 36）+ 预测式返回。
+        versionName = "1.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 端点来自本地 local.properties，绝不硬编码（见文件顶部说明）。
@@ -326,6 +386,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.google.zxing:core:3.5.3")
+    // 相册选图解码：读拍摄照片的 EXIF 旋转角（minSdk 26 不能用 ImageDecoder 的
+    // 自动 EXIF 处理，28+ 才有）。只进 APK 一个小库，无传递依赖。
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     /*
      * 扫码依赖：相机层走 CameraX，不用 Camera1。
      *

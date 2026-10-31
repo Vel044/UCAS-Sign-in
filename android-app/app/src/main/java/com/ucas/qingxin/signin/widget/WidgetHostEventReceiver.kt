@@ -1,5 +1,6 @@
 package com.ucas.qingxin.signin.widget
 
+import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -30,6 +31,19 @@ class WidgetHostEventReceiver : BroadcastReceiver() {
                 runCatching { WidgetRefreshScheduler.sync(context) }
                 runCatching { WidgetRefreshScheduler.rescheduleAlarm(context) }
                 runCatching { TodayCourseWidgetReceiver.requestUpdate(context) }
+            }
+
+            AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED -> {
+                // 用户撤销精确闹钟权限（API 31+）时，系统会**同时取消**该应用全部
+                // 已排的精确闹钟并发送本广播。若此刻进程还活着（典型：用户在前台
+                // 改系统设置），QingxinApp.onCreate 不会重跑、闹钟链就此断掉 ——
+                // 必须立刻按「当前权限」重排：已无精确权限时 scheduleAlarm 会自动
+                // 降级为非精确（Doze 下最多推迟约 15 分钟，SWEEP 槽兜底）。
+                runCatching {
+                    com.ucas.qingxin.signin.attendance.AttendanceScheduler
+                        .ensureSchedule(context)
+                }
+                runCatching { WidgetRefreshScheduler.rescheduleAlarm(context) }
             }
         }
     }

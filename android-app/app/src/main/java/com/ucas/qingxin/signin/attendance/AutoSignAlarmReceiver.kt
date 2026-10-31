@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * 自动签到闹钟接收器，处理两个槽（见 [AttendanceScheduler.AlarmSlot]）。
+ * 自动签到闹钟接收器，处理三个槽（见 [AttendanceScheduler.AlarmSlot]）。
  *
  * ## [ACTION_AUTO_SIGN_REMIND]（提醒槽）
  *
@@ -21,15 +21,22 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 它是 1.2.1 新增的：1.2.0 的提醒是守护服务 `delay` 睡到点时顺带发出的，
  * 而省电档没有守护服务 —— 于是省电档**完全收不到提醒**。
  *
- * ## [ACTION_AUTO_SIGN_ALARM]（签到槽）
+ * ## [ACTION_AUTO_SIGN_ALARM]（签到槽）与 [ACTION_AUTO_SIGN_SWEEP]（补签槽）
  *
  * 职责很窄：把进程叫醒，然后把活儿交给「守护服务 + 执行引擎」。
  * 之所以不在这里做重试，是因为 `goAsync()` 只适合几秒级的短任务
- * （`setExactAndAllowWhileIdle` 给的 partial wakelock 也只有 10 秒量级），
- * 而窗口内的重试需要跨 60–90 秒的间隔。
+ * （`setExactAndAllowWhileIdle` 给的 partial wakelock 也只有 10 秒量级）。
+ * 本次唤醒的 18 秒看门狗内，执行引擎自带「先快后慢」的重试
+ * （前两拍 3–5 秒，见 [AutoSignWindowRunner.retryDelayMs]），能消化瞬时失败；
+ * 更长的间隔交给守护服务与 SWEEP 槽。
+ *
+ * SWEEP 槽（1.3.7 起）与签到槽走完全相同的处理：它是「随机时刻已过、窗口未关」
+ * 期间每 3 分钟一拍的补签闹钟 —— 1.3.6 里这个区间没有任何机制会再回来，
+ * 是「一次瞬时失败 = 整窗静默丢失」的直接成因。两槽共用一个执行体，
+ * 并发由引擎的执行锁与按课次预算天然串行。
  *
  * 守护服务**只在需要时**才拉起（[AutoSignEngine.shouldRunDaemon]）：
- * 省电档不启，普通档也只在临近签到窗口时才启 —— 否则一个 `START_STICKY`
+ * 省电档不启，普通档也只在临近 / 处于签到窗口时才启 —— 否则一个 `START_STICKY`
  * 的前台服务会带着常驻通知活一整天，进程整夜不被系统冻结。
  */
 class AutoSignAlarmReceiver : BroadcastReceiver() {
@@ -38,12 +45,19 @@ class AutoSignAlarmReceiver : BroadcastReceiver() {
         val action = intent?.action ?: return
         val appContext = context.applicationContext
         val app = appContext as? QingxinApp ?: return
-        if (!app.isReady) return
+        if (!app.isReady) {
+            // 容器初始化失败时绝不能把这次唤醒直接丢掉：转交给 WorkManager 稍后再试。
+            // 入队不依赖应用容器（WorkManager 走自己的初始化），因此这条路总能走通。
+            if (AttendanceScheduler.readSettings(appContext).autoSignEnabled) {
+                runCatching { AttendanceScheduler.enqueueRecovery(appContext) }
+            }
+            return
+        }
         if (!app.attendanceScheduler.getSettings().autoSignEnabled) return
 
         when (action) {
             ACTION_AUTO_SIGN_REMIND -> onRemind(app)
-            ACTION_AUTO_SIGN_ALARM -> onSignWindow(appContext, app)
+            ACTION_AUTO_SIGN_ALARM, ACTION_AUTO_SIGN_SWEEP -> onSignWindow(appContext, app)
         }
     }
 
@@ -79,8 +93,19 @@ class AutoSignAlarmReceiver : BroadcastReceiver() {
         /** 「上课前 15 分钟」提醒槽的动作。与签到槽分开，才能用不同的 `PendingIntent`。 */
         const val ACTION_AUTO_SIGN_REMIND = "com.ucas.qingxin.signin.action.AUTO_SIGN_REMIND"
 
-        /** 硬超时：`goAsync()` 不能长时间占用，超时后立刻归还控制权。 */
-        private const val WATCHDOG_MS = 18_000L
+        /** 窗口内补签槽（1.3.7 起）的动作。与签到槽同走 [onSignWindow]。 */
+        const val ACTION_AUTO_SIGN_SWEEP = "com.ucas.qingxin.signin.action.AUTO_SIGN_SWEEP"
+
+        /**
+         * 硬超时：`goAsync()` 不能长时间占用，超时后立刻归还控制权。
+         *
+         * 24 秒的账：单次签到请求超时 10 秒、校时 6 秒，1.3.8 的时间戳自愈链
+         * 最坏要「请求 + 强制校时 + 重试 + 备选通道」= 36 秒 —— 18 秒装不下，
+         * 慢网络下回退链会在中途被砍（2026-10-28 现场记录的取消正是这类打断）。
+         * 24 秒仍留有 `goAsync` 的余量（后台广播预算远大于此），且绝大多数现场
+         * 单请求 1~3 秒，链全程 5~10 秒内完成，超时只兜真正的网络异常。
+         */
+        private const val WATCHDOG_MS = 24_000L
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }

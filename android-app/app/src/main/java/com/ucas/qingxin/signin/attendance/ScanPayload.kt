@@ -60,7 +60,7 @@ sealed interface ScanPayload {
         /** 相对 [com.ucas.qingxin.signin.network.QingxinApiService.BASE_URL] 的接口路径。 */
         val path: String
 
-        /** 提交时附带的 query（**不含**用户身份 `id`，那个由 API 层统一追加）。 */
+        /** 提交时附带的 query（**不含**用户身份 `id`，那个由 API 层放进表单体）。 */
         val query: String
 
         /** 二维码里写的域名，仅用于向用户提示；不会拿它发请求（理由见 [DirectSign.qrHost]）。 */
@@ -78,7 +78,12 @@ sealed interface ScanPayload {
         override val query: String,
         /** 从 query（必要时退化到整段原文）里认出来的签到编号。 */
         val signCode: SignCode,
-        /** 二维码自带的 `timestamp`；null 表示没带，提交时由校时补一个。 */
+        /**
+         * 二维码自带的 `timestamp` 原值（字符串，未做任何解释）。
+         *
+         * 它是否被照抄提交，由 [ScanTimestampPolicy] 按「还新不新鲜」决定：
+         * 新鲜就一个字不改，已陈旧就改用本校校时（见 [withTimestampOf]）。
+         */
         val qrTimestamp: String?,
         /**
          * 二维码指向的域名。
@@ -117,35 +122,30 @@ sealed interface ScanPayload {
         val isReplay: Boolean get() = query.isNotEmpty()
 
         /**
-         * 是否需要调用方补一个学校校时。
+         * 二维码自带 `timestamp` 的毫秒值；没带、或带的不是数字时为 null。
          *
-         * ## 为什么**只有**自己拼请求时才补（2026-10-13 修）
-         * 轻新课堂的扫码通道是**纯重放**：`requestPost(二维码query + "&id=" + uid, …)`，
-         * 它**从不新增 `timestamp`**。因此二维码里已经有 query 时照抄即可 ——
-         * 多塞一个 `timestamp` 是**本项目独有的**改动，而学校那句「签到码已失效」
-         * 既可能真是码轮换过期，也可能正是被这个多出来的值判掉的
-         * （真机实测见 `docs/lecture-signin-research.md` §10.16）。
-         * 在拿到反证之前，**不偏离唯一已知可用的客户端**。
-         *
-         * 反过来，整段原文只有一个裸编号时没有 query 可重放，请求必须由我们拼完整 ——
-         * 一个不含任何新鲜度证明的请求没有任何被接受的可能，所以这时才补时间戳。
+         * 交给 [ScanTimestampPolicy] 判断「还新不新鲜」，本层不做任何取舍。
          */
-        val needsTimestamp: Boolean get() = !isReplay
+        val qrTimestampMs: Long? get() = qrTimestamp?.trim()?.toLongOrNull()
 
         /**
-         * 补上学校校时（只在 [needsTimestamp] 为真时生效，即请求由我们自己拼的那一种）。
+         * 把 `timestamp` 写成给定值（存在则替换，不存在则追加）。
          *
-         * ## 为什么不无条件用校时**覆盖**二维码里的 timestamp
-         * 那样会把「学校自己发出来的一个值」换成「我们本地推算出来的一个值」，
-         * 一旦校时样本偏了（RTT 抖动、校时接口被劫持），失败原因会变成一个
-         * 用户完全无法理解、我们也无法复现的「签到码失效」。
-         * 保留二维码原值则让这条通道**不依赖本机时钟**，与小程序完全一致。
+         * 这是本项目**唯一**会改动学校所发参数的入口，因此只允许由
+         * [ScanTimestampPolicy] 的判定结果驱动 —— 它已经确证过原有取值不再是
+         * 「一个够新的时间」（见该对象的不变量 1）。两种情形共用它，因此是**无条件**的：
+         *
+         * - 二维码带了但已陈旧 ⇒ 替换掉它；
+         * - 二维码没带（整段原文只是一个裸编号）⇒ 追加一个，否则请求里
+         *   连新鲜度证明都没有，必然被拒。
+         *
+         * 早先这里还有一个「只在二维码没带时才补」的 `withTimestamp` 成员，用来表达
+         * 「补我们缺的」与「换掉已有的」的区别（`docs/lecture-signin-research.md` §10.16）。
+         * 那个区别现在完全落在 [ScanTimestampPolicy] 上，本层再留一个永不触发的分支，
+         * 只会让「谁有权改动学校参数」这件事变得含糊，因此已删除。
          */
-        fun withTimestamp(schoolTimestampMs: Long): String = if (needsTimestamp) {
-            ScanQuery.upsert(submitQuery, TIMESTAMP, schoolTimestampMs.toString())
-        } else {
-            submitQuery
-        }
+        fun withTimestampOf(timestampMs: Long): String =
+            ScanQuery.upsert(submitQuery, TIMESTAMP, timestampMs.toString())
 
         /** 界面回显用的人类可读名称。 */
         val label: String get() = signCode.label
@@ -316,7 +316,7 @@ enum class NotSignKind(val label: String, val hint: String) {
  * 那会把一个只差一个参数、本来还能签的请求直接判死。按 `&` / `=` 两段拆
  * 反而更稳：解析不了的片段原样留着，不影响我们替换自己认得的那几个键。
  */
-private object ScanQuery {
+internal object ScanQuery {
     /** 取同名参数的值；缺失或为空串都算「没有」。 */
     fun param(query: String, name: String): String? = query.split('&')
         .asSequence()
@@ -333,4 +333,11 @@ private object ScanQuery {
         }
         return (kept + "$name=$value").joinToString("&")
     }
+
+    /** 删掉同名参数；其余片段（含我们看不懂的）原样保留，理由同本对象开头。 */
+    fun remove(query: String, name: String): String = query.split('&')
+        .filter {
+            it.isNotBlank() && !it.substringBefore('=').trim().equals(name, ignoreCase = true)
+        }
+        .joinToString("&")
 }

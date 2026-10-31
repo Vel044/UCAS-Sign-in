@@ -49,7 +49,17 @@ internal object KeepAliveHelper {
         return false
     }
 
-    /** 是否允许排精确闹钟（Android 12+ 需要 `SCHEDULE_EXACT_ALARM`，用户可撤销）。 */
+    /**
+     * 是否允许排精确闹钟。
+     *
+     * 版本适配（2026-10-28 审查补记）：`AlarmManager.canScheduleExactAlarms()`
+     * 对 `SCHEDULE_EXACT_ALARM`（可撤销）与 `USE_EXACT_ALARM`（API 33+ 安装即授予）
+     * **任一**持有即返回 true —— 本应用两者都声明，因此：
+     * Android 12/12L 走 SCHEDULE 流程（默认授予、可撤销、有引导页）；
+     * Android 13+ 靠 USE 自动成立；Android 14+ 上即使用户撤销了 SCHEDULE，
+     * USE 仍在 —— 只有系统级硬拦（罕见）才会降级为非精确 + SWEEP 兜底。
+     * API < 31 无权限模型，恒为 true。
+     */
     fun canScheduleExactAlarms(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
         return runCatching {

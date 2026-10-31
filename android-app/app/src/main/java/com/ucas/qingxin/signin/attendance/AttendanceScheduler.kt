@@ -6,12 +6,16 @@ import android.content.Context
 import android.content.Intent
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.ucas.qingxin.signin.QingxinApp
+import com.ucas.qingxin.signin.data.Course
 import com.ucas.qingxin.signin.data.KeepAliveState
 import com.ucas.qingxin.signin.data.UserSettings
 import com.ucas.qingxin.signin.widget.WidgetRefreshScheduler
@@ -24,9 +28,10 @@ import java.util.concurrent.TimeUnit
  *
  * ## 唤醒预算（一等约束）
  *
- * 目标：**每节课 1 次唤醒**，无课/已签完的日子只留 1 次「跨天翻页」。
- * 4 节课的一天 ≈ 5 次唤醒。对比 1.1.11 里小部件每 10 分钟一条的闹钟链
- * （约 144 次/天）是**净下降**。
+ * Happy path 仍是**每节课 2 次唤醒**（提醒槽 + 签到槽），无课/已签完的日子只留
+ * 1 次「跨天翻页」。1.3.7 起新增的三条兜底全部是「**失败才付费**」：
+ * SWEEP 槽与 post-mortem 任务在签成那一刻就会被取消（一次都不触发），
+ * 安全网周期任务只在「自动签到开着且今日可能还有待签课程」时存在。
  *
  * ## 两条互斥的调度路径
  *
@@ -38,23 +43,34 @@ import java.util.concurrent.TimeUnit
  * ## 刻意不做的三件事
  *
  * 1. **不再使用 15 分钟 `PeriodicWorkRequest`**：那会在一天内反复唤醒并抓取网络；
- * 2. **重试不排新闹钟**：Doze 下 `setAndAllowWhileIdle` 最快也要约 15 分钟才放行一次，
- *    用它做秒级重试是错的，重试只跑在进程内（见 [AutoSignWindowRunner]）；
- * 3. **不做轮询**：「提醒」与「签到」各自只排一个闹钟（见 [AlarmSlot]）。
+ * 2. **秒级重试不排新闹钟**：Doze 下 `setAndAllowWhileIdle` 最快也要约 15 分钟才放行一次，
+ *    用它做秒级重试是错的，秒级节奏只跑在进程内（见 [AutoSignWindowRunner]）。
+ *    进程死掉之后的**分钟级**补签由 SWEEP 槽接管（3 分钟一拍、确定性触发点，
+ *    受尝试预算与窗口双重封顶）—— 这是对 1.3.6「一次瞬时失败 = 整窗静默丢失」的修正；
+ * 3. **不做轮询**：每个槽各自只排一个闹钟（见 [AlarmSlot]）。
  *
- * ## 两条闹钟槽（1.2.1 起）
+ * ## 三条闹钟槽
  *
  * | 槽 | 时刻 | 做什么 | 代价 |
  * | --- | --- | --- | --- |
  * | [AlarmSlot.REMIND] | **上课前 15 分钟** | 只发一条「即将开始签到」提醒 | 不联网、不启服务 |
  * | [AlarmSlot.SIGN] | 随机签到时刻 | 拉起守护服务（普通档）并执行签到 | 一次网络 |
+ * | [AlarmSlot.SWEEP] | `随机时刻 + k×3min` | 窗口内补签：上一拍没签成就在这一拍再试 | 仅失败路径付费 |
  *
- * 拆出 REMIND 槽的原因：1.2.0 的提醒是守护服务 `delay` 睡到点时**顺带发出**的，
- * 而省电档没有守护服务 —— 于是省电档**完全收不到提醒**。独立成闹钟后两档都有提醒，
- * 且 REMIND 槽不联网不启服务，唤醒成本接近 0。
+ * SWEEP 必须是独立槽：SIGN 槽在「今日无事」分支被翻页闹钟复用，复用会互相覆盖；
+ * 且两节课的窗口可能重叠（`[开课前15分钟, 开课后20分钟]` 覆盖很宽），
+ * 「下一节课的 SIGN」与「本节的 SWEEP」可以同时成立。
  *
  * 提醒时刻定在「上课前 15 分钟」而不是「随机签到时刻前 N 分钟」：随机时刻每节课都变，
  * 以它为基准的提醒让用户无法预知；相对上课时刻则一眼可算（见 [AutoSignEngine.remindAtFor]）。
+ *
+ * ## WorkManager 侧的三条兜底（1.3.7 起）
+ *
+ * | 任务 | 类型 | 使命 |
+ * | --- | --- | --- |
+ * | `auto_sign_postmortem` | 一次性，`deadline + 5min` | 兜最底：补终态通知 + 重排后续闹钟。成功即取消 |
+ * | `auto_sign_safety` | 周期（随档位 60/120 分钟），**无网络约束** | 闹钟被 ROM / 电池策略掐掉后的自愈通道；gate 进退见 [updateSafetyPeriodic] |
+ * | `auto_sign_recovery` | 一次性 | 接收器在容器未就绪时丢弃唤醒前的最后退路 |
  */
 class AttendanceScheduler(context: Context) {
 
@@ -81,6 +97,12 @@ class AttendanceScheduler(context: Context) {
             action = AutoSignAlarmReceiver.ACTION_AUTO_SIGN_ALARM,
             keyAt = K_ALARM_AT,
             keyExact = K_ALARM_EXACT,
+        ),
+        SWEEP(
+            reqCode = REQ_CODE_SWEEP,
+            action = AutoSignAlarmReceiver.ACTION_AUTO_SIGN_SWEEP,
+            keyAt = K_SWEEP_AT,
+            keyExact = K_SWEEP_EXACT,
         ),
     }
 
@@ -139,6 +161,7 @@ class AttendanceScheduler(context: Context) {
     fun stop() {
         cancelAlarms()
         cancelWork()
+        cancelUniqueWorks()
         AttendanceDaemonService.stop(appContext)
         WidgetRefreshScheduler.setDaemonActive(appContext, false)
         AutoSignRandomizer.clearAll()
@@ -154,42 +177,186 @@ class AttendanceScheduler(context: Context) {
      * 重新计算并对齐「下一次该唤醒的时刻」。
      *
      * 幂等：随机时刻一旦冻结（见 [AutoSignRandomizer]），重复调用得到同一个目标，
-     * 闹钟不会被反复顺延。
+     * 闹钟不会被反复顺延。SWEEP 槽的幂等由 [armSweep] 的 state-guard 保证。
+     *
+     * @param startDaemon 是否允许本调用拉起 / 停掉守护服务。**worker 路径必须传
+     *   false**：普通 worker 没有 FGS 临时豁免，API 31+ 上启动会被拒绝并写下
+     *   假的 `markDaemonBlocked(true)`（设置页会误报「后台服务被拦」）。
+     *   FGS 启动只保留给闹钟接收器（精确闹钟豁免窗）、前台与开机广播。
      */
-    fun ensureSchedule() {
+    fun ensureSchedule(startDaemon: Boolean = true) {
         val app = appContext as? QingxinApp ?: return
         if (!app.isReady) return
         if (!getSettings().autoSignEnabled) {
             cancelAlarms()
             cancelWork()
+            cancelUniqueWorks()
+            updateSafetyPeriodic(app, null)
             return
         }
 
-        val due = runCatching { AutoSignEngine.nextDue(app) }.getOrNull()
-        if (due == null) {
-            // 今日已无待签课程：只留一个跨天翻页闹钟，空闲日唤醒 1 次。
-            cancelAlarms()
-            cancelWork()
-            scheduleAlarm(AlarmSlot.SIGN, dayRolloverAt(), exact = false)
-            syncDaemon()
-            return
-        }
-
+        val plan = runCatching { AutoSignEngine.planToday(app) }.getOrNull()
         val exact = KeepAliveHelper.isBatteryExempt(appContext) &&
             KeepAliveHelper.canScheduleExactAlarms(appContext)
         val now = System.currentTimeMillis()
-        // 提醒槽：只在「还来得及提前提醒」时才排。已经过了提醒时刻就不再补排，
-        // 否则每一次 ensureSchedule（每次闹钟、每次开 App）都会立刻触发一次无用唤醒。
-        val remindAt = AutoSignEngine.remindAtFor(due)
-        if (remindAt > now + MIN_ALARM_LEAD_MS) {
-            scheduleAlarm(AlarmSlot.REMIND, remindAt, exact)
-        } else {
+
+        val due = plan?.next
+        // if / else-if 链（而不是 when）：编译器只在链式 null 检查的 else 里
+        // 对 `due` 做智能转换，`when` 分支各自独立判断做不到这一点。
+        if (due == null && plan?.window == null) {
+            // 今日无事可做（无课 / 全部签完 / 全部出终态）：
+            // 只留一个跨天翻页闹钟，空闲日唤醒 1 次。
+            cancelAlarms()
+            cancelWork()
+            scheduleAlarm(AlarmSlot.SIGN, dayRolloverAt(), exact = false)
+        } else if (due == null) {
+            // 随机时刻已过但窗口未关 —— 1.3.6 在这里「全清 + 只留翻页」，
+            // 是「一次瞬时失败 = 整窗静默丢失」的直接成因。现在窗口内补签
+            // 由下方统一武装的 SWEEP 接管，post-mortem 负责终局通知。
             cancelAlarm(AlarmSlot.REMIND)
+            cancelAlarm(AlarmSlot.SIGN)
+            cancelWork()
+        } else {
+            // 提醒槽：只在「还来得及提前提醒」时才排。已经过了提醒时刻就不再补排，
+            // 否则每一次 ensureSchedule（每次闹钟、每次开 App）都会立刻触发一次无用唤醒。
+            val remindAt = AutoSignEngine.remindAtFor(due)
+            if (remindAt > now + MIN_ALARM_LEAD_MS) {
+                scheduleAlarm(AlarmSlot.REMIND, remindAt, exact)
+            } else {
+                cancelAlarm(AlarmSlot.REMIND)
+            }
+            scheduleAlarm(AlarmSlot.SIGN, due.targetMs, exact)
+            // 两条路径互斥：能精确唤醒时不再排 WorkManager 备份，避免同一次签到被唤醒两遍。
+            if (exact) cancelWork() else scheduleWork(due.targetMs)
         }
-        scheduleAlarm(AlarmSlot.SIGN, due.targetMs, exact)
-        // 两条路径互斥：能精确唤醒时不再排 WorkManager 备份，避免同一次签到被唤醒两遍。
-        if (exact) cancelWork() else scheduleWork(due.targetMs)
-        syncDaemon()
+
+        // SWEEP 独立于上面的分支：两节课的窗口可能重叠（窗口 = 开课前 15 分钟至
+        // 开课后 20 分钟），「下一节课的 SIGN」与「本节的 SWEEP」可以同时成立。
+        val inWindow = plan?.window
+        if (inWindow != null) {
+            armSweep(app, inWindow, now, exact)
+        } else {
+            cancelAlarm(AlarmSlot.SWEEP)
+        }
+
+        armPostmortem(plan)
+        updateSafetyPeriodic(app, plan)
+        if (startDaemon) syncDaemon()
+    }
+
+    /**
+     * 武装 SWEEP 槽（窗口内补签闹钟）。
+     *
+     * 幂等分两层：
+     * 1. state 里已有**未来**的 SWEEP → 一律不动。[AutoSignSelector.sweepAtFor] 是
+     *    (target, now) 的纯函数，但「进程重启回窗」等场景下它的返回值会被
+     *    `leadMs` 钳制到「now + 最小提前量」—— 若每次 `ensureSchedule` 都重算，
+     *    就会重蹈 [scheduleAlarm] 注释里警告过的「每次顺延、永不触发」覆辙。
+     *    state-guard 才是真正的幂等保证，公式只负责「每拍推进一个槽」；
+     * 2. 没有未来 SWEEP 时才排下一拍；公式返回 null（窗口将尽）则撤销，
+     *    终局交给 post-mortem。
+     *
+     * SWEEP 不指向具体课程：它触发后只是跑一遍引擎，由 [AutoSignEngine] 挑
+     * 「此刻该签的课」。因此为上一节武装、尚未触发的 SWEEP 留着无害。
+     */
+    private fun armSweep(app: QingxinApp, course: Course, now: Long, exact: Boolean) {
+        if (state.getLong(AlarmSlot.SWEEP.keyAt, 0L) > now) return
+        val begin = runCatching { app.courseRepository.parseBeginMs(course) }.getOrNull() ?: return
+        val today = AutoSignRandomizer.todayKey()
+        val target = AutoSignRandomizer.targetMsFor(course.id.ifBlank { course.uuid }, begin, now, today)
+        val at = AutoSignSelector.sweepAtFor(
+            targetMs = target,
+            deadlineMs = AutoSignRandomizer.deadlineMs(begin),
+            nowMs = now,
+            leadMs = MIN_ALARM_LEAD_MS,
+        )
+        if (at == null) {
+            cancelAlarm(AlarmSlot.SWEEP)
+            return
+        }
+        scheduleAlarm(AlarmSlot.SWEEP, at, exact)
+    }
+
+    /**
+     * 排 / 撤 post-mortem 一次性任务（`最早 deadline + 5min`）。
+     *
+     * 幂等沿用闹钟的 state-key 模式而不是 WorkManager 的 KEEP：KEEP 在「最早 deadline
+     * 前移」时拿到陈旧目标，REPLACE 又会取消正在执行的任务 —— 只有「目标真变了才
+     * REPLACE」两头都对。**刻意不加网络约束**：它的另一职责是重排下一节课的闹钟，
+     * 而 `planToday` / 闹钟重排走的是离线取数链；加了 CONNECTED 会在离线时把它
+     * 无限期推迟 —— 那正是它要兜底的场景。
+     */
+    private fun armPostmortem(plan: AutoSignEngine.TodayPlan?) {
+        if (plan == null) return // 取不到课表数据：不动已有任务。宁可多醒一次，不可丢终态。
+        if (!plan.hasPending) {
+            cancelPostmortem()
+            return
+        }
+        val deadline = plan.nextDeadlineMs
+        // 全部 pending 的 deadline 都已过期 → 立即收尾（补终态通知 + 重排）。
+        val fireAt = if (deadline == null) {
+            System.currentTimeMillis()
+        } else {
+            deadline + POSTMORTEM_LAG_MS
+        }
+        if (state.getLong(K_POSTMORTEM_AT, 0L) == fireAt) return
+        runCatching {
+            val request = OneTimeWorkRequestBuilder<AutoSignPostmortemWorker>()
+                .setInitialDelay(
+                    (fireAt - System.currentTimeMillis()).coerceAtLeast(0L),
+                    TimeUnit.MILLISECONDS,
+                )
+                .build()
+            WorkManager.getInstance(appContext).enqueueUniqueWork(
+                POSTMORTEM_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                request,
+            )
+            state.edit().putLong(K_POSTMORTEM_AT, fireAt).apply()
+        }
+    }
+
+    private fun cancelPostmortem() {
+        if (state.getLong(K_POSTMORTEM_AT, 0L) == 0L) return // 没排过，省一次 IPC
+        runCatching { WorkManager.getInstance(appContext).cancelUniqueWork(POSTMORTEM_WORK_NAME) }
+        state.edit().putLong(K_POSTMORTEM_AT, 0L).apply()
+    }
+
+    /**
+     * 安全网周期任务的进退（gate）。
+     *
+     * 取消条件必须是「**确认**今日无事」而不是「现在看不到事」：翻页闹钟（00:02）
+     * 触发时本地缓存还是昨天的，`cachedToday` 按日期取不到新数据，若此刻按
+     * 「无 pending」撤掉周期任务，就再也没有执行体去刷新课表了 —— gate 自杀死锁。
+     * 因此**数据不是今天的 → 一律保留**；它的 body（刷新数据 → 引擎 → 重排）
+     * 正是翻页的执行者。判断细节见 [AutoSignSelector.needsSafetyPeriodic]。
+     */
+    private fun updateSafetyPeriodic(app: QingxinApp, plan: AutoSignEngine.TodayPlan?) {
+        runCatching {
+            val wm = WorkManager.getInstance(appContext)
+            val keep = when {
+                !getSettings().autoSignEnabled -> false
+                // 取不到任何课表数据（内存与缓存皆空）：保留执行体，它的 body 会
+                // 刷新数据并重算 gate，而不是让整条链失去最后的执行者。
+                plan == null -> true
+                else -> AutoSignSelector.needsSafetyPeriodic(
+                    dataIsToday = WidgetRefreshScheduler.lastDataDay(appContext) ==
+                        AutoSignRandomizer.todayKey(),
+                    hasPending = plan.hasPending,
+                    hasWindow = plan.window != null,
+                    hasNext = plan.next != null,
+                )
+            }
+            if (!keep) {
+                wm.cancelUniqueWork(SAFETY_WORK_NAME)
+                return
+            }
+            val minutes = PowerProfiles.forContext(appContext).safetyCheckMinutes
+            val request = PeriodicWorkRequestBuilder<AutoSignSafetyWorker>(minutes, TimeUnit.MINUTES)
+                .build()
+            // UPDATE 而不是 KEEP：切档必须能改写已排好的间隔（与 widget 周期任务同一条理由）。
+            wm.enqueueUniquePeriodicWork(SAFETY_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+        }
     }
 
     private fun dayRolloverAt(): Long =
@@ -271,6 +438,18 @@ class AttendanceScheduler(context: Context) {
         runCatching { WorkManager.getInstance(appContext).cancelUniqueWork(WORK_NAME) }
     }
 
+    /**
+     * 取消 1.3.7 起的三条 WorkManager 兜底（post-mortem / 安全网 / 恢复）。
+     *
+     * 与 [cancelWork]（签到槽备份，按目标时刻反复重排）不同，这三条的进退
+     * 全部由 [ensureSchedule] 单点决定 —— 关闭自动签到或退出登录时从这里撤销。
+     */
+    fun cancelUniqueWorks() {
+        cancelPostmortem()
+        runCatching { WorkManager.getInstance(appContext).cancelUniqueWork(SAFETY_WORK_NAME) }
+        runCatching { WorkManager.getInstance(appContext).cancelUniqueWork(RECOVERY_WORK_NAME) }
+    }
+
     // ------------------------------------------------------------------ 保活状态
 
     fun markDaemonBlocked(blocked: Boolean) {
@@ -310,6 +489,14 @@ class AttendanceScheduler(context: Context) {
             daemonBlocked = isDaemonBlocked(),
             estimatedWakeupsToday = estimateWakeupsToday(),
             systemPowerSave = profile.systemPowerSave,
+            deviceClockSkewMs = runCatching {
+                val app = appContext as? QingxinApp ?: return@runCatching null
+                if (!app.isReady) return@runCatching null
+                // 只复用现有校时样本（30 秒 TTL），不为此发网络请求：
+                // 没样本就不判定，宁缺毋滥。
+                app.qrTimeline.currentSchoolTimeOrNull()
+                    ?.let { schoolNow -> System.currentTimeMillis() - schoolNow }
+            }.getOrNull(),
         )
     }
 
@@ -351,6 +538,9 @@ class AttendanceScheduler(context: Context) {
         private const val K_ALARM_EXACT = "alarm_exact"
         private const val K_REMIND_AT = "remind_alarm_at"
         private const val K_REMIND_EXACT = "remind_alarm_exact"
+        private const val K_SWEEP_AT = "sweep_alarm_at"
+        private const val K_SWEEP_EXACT = "sweep_alarm_exact"
+        private const val K_POSTMORTEM_AT = "postmortem_at"
         private const val K_DAEMON_BLOCKED = "daemon_blocked"
         private const val K_BOOT_SEEN = "boot_seen"
         private const val K_LOCK_CONFIRMED = "lock_confirmed"
@@ -358,7 +548,7 @@ class AttendanceScheduler(context: Context) {
         /** 闹钟最早不能早于「现在 + 这个值」：避免已过时刻的闹钟被立刻触发成一次空唤醒。 */
         private const val MIN_ALARM_LEAD_MS = 5_000L
 
-        /** 每节课的唤醒预算：提醒槽 + 签到槽。 */
+        /** 每节课的唤醒预算：提醒槽 + 签到槽（SWEEP 与 post-mortem 仅失败路径出现，不计入）。 */
         private const val WAKEUPS_PER_COURSE = 2
 
         private const val REQ_CODE_ALARM = 9101
@@ -366,7 +556,25 @@ class AttendanceScheduler(context: Context) {
         /** 提醒槽的 `request code`：必须与签到槽不同，否则两个 `PendingIntent` 会互相覆盖。 */
         private const val REQ_CODE_REMIND = 9102
 
+        /** SWEEP 槽（窗口内补签）。必须独立：SIGN 槽在「今日无事」分支被翻页闹钟复用。 */
+        private const val REQ_CODE_SWEEP = 9103
+
         const val WORK_NAME = "auto_sign_once"
+
+        /** post-mortem：`deadline + [POSTMORTEM_LAG_MS]` 的一次性收尾任务。 */
+        private const val POSTMORTEM_WORK_NAME = "auto_sign_postmortem"
+
+        /** 安全网：随档位周期的自愈任务，闹钟链被掐断后的最后一条通道。 */
+        private const val SAFETY_WORK_NAME = "auto_sign_safety"
+
+        /** 恢复：接收器容器未就绪时的一次性退路。 */
+        private const val RECOVERY_WORK_NAME = "auto_sign_recovery"
+
+        /** post-mortem 在 deadline 之后留的余量：确保窗口已彻底关闭后再收尾。 */
+        private const val POSTMORTEM_LAG_MS = 5L * 60L * 1000L
+
+        /** 恢复任务的延迟：给容器初始化（或其故障）一点自愈时间，又不至于错过窗口太久。 */
+        private const val RECOVERY_DELAY_MS = 30L * 1000L
 
         private val ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
 
@@ -388,11 +596,40 @@ class AttendanceScheduler(context: Context) {
         }
 
         /** 供接收器 / 守护服务等非 Activity 位置调用的静态入口。 */
-        fun ensureSchedule(context: Context) {
+        fun ensureSchedule(context: Context, startDaemon: Boolean = true) {
             runCatching {
                 val app = context.applicationContext as? QingxinApp ?: return
                 if (!app.isReady) return
-                app.attendanceScheduler.ensureSchedule()
+                app.attendanceScheduler.ensureSchedule(startDaemon)
+            }
+        }
+
+        /**
+         * 接收器在容器未就绪时的最后退路：交给 WorkManager 稍后把进程再拉起来重试。
+         *
+         * 刻意放在 companion 并且**只依赖 WorkManager**：容器初始化失败时
+         * `app.attendanceScheduler` 可能根本没构造出来（lateinit），实例方法一条都不能碰。
+         * WorkManager 走自己的初始化，这条路总能走通。
+         *
+         * 1.4.0 起升格 **expedited**（配 `RUN_AS_NON_EXPEDITED_WORK_REQUEST` 兜底）：
+         * 它的使命是「别被 JobScheduler 的批处理合并拖到窗口之外」，正是 expedited
+         * 的定义域。如实说明一个平台细节：带了 [RECOVERY_DELAY_MS] 初始延迟后，
+         * 部分 API 级别上 expedited 资格不会在延迟结束时保留（平台文档口径不一）——
+         * 最坏退化为与旧版完全相同的行为，无回归； honors 时则是纯收益。
+         * 容器未就绪时 worker 自会 `retry()`，时序语义不变。
+         */
+        fun enqueueRecovery(context: Context) {
+            val appContext = context.applicationContext
+            runCatching {
+                val request = OneTimeWorkRequestBuilder<AutoSignRecoveryWorker>()
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    .setInitialDelay(RECOVERY_DELAY_MS, TimeUnit.MILLISECONDS)
+                    .build()
+                WorkManager.getInstance(appContext).enqueueUniqueWork(
+                    RECOVERY_WORK_NAME,
+                    ExistingWorkPolicy.KEEP,
+                    request,
+                )
             }
         }
     }
@@ -412,7 +649,8 @@ class AutoSignWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext as? QingxinApp ?: return Result.success()
-        if (!app.isReady) return Result.success()
+        // 容器没就绪就 Retry：签到槽被消费掉却什么都不做，等于白丢一次兜底机会。
+        if (!app.isReady) return Result.retry()
         if (!app.attendanceScheduler.getSettings().autoSignEnabled) return Result.success()
 
         // WorkManager 的协程有约 10 分钟上限，因此这里收敛重试轮数，剩余交给闹钟。
@@ -420,7 +658,94 @@ class AutoSignWorker(
 
         // 只重排**闹钟**：WorkManager 的 KEEP 语义会让「任务内部自我重排」静默失效，
         // 所以下一次的一次性任务由闹钟触发时再入队。
-        runCatching { app.attendanceScheduler.ensureSchedule() }
+        // startDaemon = false：worker 没有前台服务的临时豁免，从这里拉守护服务
+        // 在 API 31+ 必被拒绝，还会把「守护被拦」记成假阳性（见 [AttendanceScheduler.ensureSchedule]）。
+        runCatching { app.attendanceScheduler.ensureSchedule(startDaemon = false) }
+        return Result.success()
+    }
+}
+
+/**
+ * post-mortem：每课次窗口关闭 5 分钟后的一次性收尾。
+ *
+ * 职责是「兜最底」：如果连 SWEEP 都没能把课签成（或整条闹钟链被 ROM 掐掉），
+ * 由它补上终态通知（用户至少知道发生了什么）并重排下一节课的闹钟（链不能断）。
+ * 签成的那一刻 [AttendanceScheduler.armPostmortem] 会把它取消，happy path 一次都不触发。
+ *
+ * 走 [AutoSignEngine.finalizeStale] 而不是 `runOnce`：后者抢不到执行锁时会静默返回，
+ * 一次性任务被消费、终态通知却丢了 —— 收尾绝不能被并发挤掉。
+ */
+class AutoSignPostmortemWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+
+    override suspend fun doWork(): Result {
+        val app = applicationContext as? QingxinApp ?: return Result.success()
+        if (!app.isReady) return Result.retry()
+        runCatching { AutoSignEngine.finalizeStale(applicationContext, app) }
+        return Result.success()
+    }
+}
+
+/**
+ * 安全网：随耗电档位的周期任务（普通 60 分钟 / 省电 120 分钟），**无网络约束**。
+ *
+ * 它是闹钟链被 ROM / 电池策略整条掐掉后的最后一条自愈通道：JobScheduler 的任务
+ * 持久化在系统侧、跨进程死亡与重启存活。代价可控 —— 可延迟、与其他应用的批处理
+ * 合并、gate（见 [AttendanceScheduler.updateSafetyPeriodic]）保证无课日为 0。
+ *
+ * ## 执行顺序刻意是「先刷数据、再签到、最后重排」
+ * 它常常是白天唯一醒着的执行体，翻页后的第一次课表刷新就靠它；
+ * 先刷数据也让引擎的取数闸门拿到新鲜课表，而不是拿昨天的缓存空转。
+ */
+class AutoSignSafetyWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+
+    override suspend fun doWork(): Result {
+        val app = applicationContext as? QingxinApp ?: return Result.success()
+        if (!app.isReady) return Result.retry()
+        if (!app.attendanceScheduler.getSettings().autoSignEnabled) return Result.success()
+
+        val loggedIn = runCatching { app.authRepository.isLoggedIn() }.getOrDefault(false)
+        if (loggedIn) {
+            // 只在成功时记账（与 [WidgetRefreshWorker] 同一套语义）：
+            // 失败要让 gate 保持「数据陈旧 → 保留」，尽快再试。
+            val ok = runCatching { app.courseRepository.loadToday() }.isSuccess
+            if (ok) runCatching { WidgetRefreshScheduler.markDataFetched(applicationContext) }
+        } else {
+            // 未登录也记「已核对」：没登录时安全网无事可做，gate 可以收摊；
+            // 重新登录后的第一次 ensureSchedule 会把它再登记回来。
+            runCatching { WidgetRefreshScheduler.markDataFetched(applicationContext) }
+        }
+
+        runCatching { AutoSignEngine.runOnce(applicationContext, app) }
+        runCatching { app.attendanceScheduler.ensureSchedule(startDaemon = false) }
+        return Result.success()
+    }
+}
+
+/**
+ * 恢复：接收器在容器未就绪时（依赖初始化失败）丢弃唤醒前的最后退路。
+ *
+ * WorkManager 的入队不依赖应用容器，因此接收器自身总是能完成这次转交；
+ * 30 秒后由它重排调度并尝试签到，容器仍没好就 `retry`（退避重试）。
+ */
+class AutoSignRecoveryWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+
+    override suspend fun doWork(): Result {
+        val app = applicationContext as? QingxinApp ?: return Result.success()
+        if (!app.isReady) return Result.retry()
+        if (!app.attendanceScheduler.getSettings().autoSignEnabled) return Result.success()
+
+        // 先重排（把被丢弃的唤醒重新接上），再尝试签到（此刻可能已在窗口内）。
+        runCatching { app.attendanceScheduler.ensureSchedule(startDaemon = false) }
+        runCatching { AutoSignEngine.runOnce(applicationContext, app) }
         return Result.success()
     }
 }

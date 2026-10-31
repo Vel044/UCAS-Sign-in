@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -92,6 +93,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.ucas.qingxin.signin.R
 import com.ucas.qingxin.signin.QingxinApp
+import com.ucas.qingxin.signin.attendance.AttendanceNotifier
 import com.ucas.qingxin.signin.attendance.AutoSignExclusions
 import com.ucas.qingxin.signin.attendance.KeepAliveHelper
 import com.ucas.qingxin.signin.data.AttendanceUiStatus
@@ -107,7 +109,17 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-private enum class AppScreen { Home, Schedule, Lecture, LectureSchedule, Manual, Scan, Settings, Logs }
+private enum class AppScreen {
+    Home,
+    Schedule,
+    Lecture,
+    LectureSchedule,
+    Manual,
+    Scan,
+    Settings,
+    Logs,
+    Records,
+}
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -187,6 +199,7 @@ class MainActivity : ComponentActivity() {
                                 vm = vm,
                                 onBack = { screen = AppScreen.Home },
                                 onOpenLogs = { screen = AppScreen.Logs },
+                                onOpenRecords = { screen = AppScreen.Records },
                             )
                             screen == AppScreen.Logs -> {
                                 // 日志器挂在 Application 上：API 层（唯一能看到学校响应正文的
@@ -194,6 +207,15 @@ class MainActivity : ComponentActivity() {
                                 val app = LocalContext.current.applicationContext as QingxinApp
                                 LogScreen(
                                     log = app.signLog,
+                                    onBack = { screen = AppScreen.Settings },
+                                )
+                            }
+                            screen == AppScreen.Records -> {
+                                // 与日志同理：签到记录也是挂在 Application 上的同一份 ——
+                                // 写入方是 AttendanceRepository（全部签到路径的唯一收口）。
+                                val app = LocalContext.current.applicationContext as QingxinApp
+                                RecordScreen(
+                                    store = app.signRecords,
                                     onBack = { screen = AppScreen.Settings },
                                 )
                             }
@@ -218,6 +240,7 @@ class MainActivity : ComponentActivity() {
                                 state = scanState,
                                 vm = scanVm,
                                 onBack = { screen = AppScreen.Home },
+                                onOpenManual = { screen = AppScreen.Manual },
                             )
                             screen == AppScreen.Schedule -> ScheduleScreen(
                                 state = scheduleState,
@@ -375,6 +398,9 @@ private fun HomeScreen(
 ) {
     // 进入主页时按需自动检查更新（节流默认 24 小时，见 MainViewModel.onEnterHome）。
     LaunchedEffect(Unit) { vm.onEnterHome() }
+    // 防撞 item key（见 courseListKeys 说明）：在 LazyColumn 之外算好，
+    // LazyListScope 不是 Composable 上下文，remember 进不去。
+    val homeCourseKeys = remember(state.courses) { courseListKeys(state.courses) }
     LazyColumn(
         Modifier
             .fillMaxSize()
@@ -454,6 +480,23 @@ private fun HomeScreen(
                         fontWeight = FontWeight.Medium,
                     )
                     Text("状态：${statusLabel(state.status)}")
+                    // 自动签到结果行（1.3.7）：后台签成 / 失败时不再只靠通知栏 ——
+                    // 应用正开着也要在主页直接给出结论，且课程列表的「已签到」
+                    // 角标由 MainViewModel 订阅课程数据流实时跟上。
+                    state.autoSignEvent?.let { evt ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            if (evt.success) {
+                                "自动签到：《${evt.courseName}》已完成" +
+                                    "（${AttendanceNotifier.formatClock(evt.atMs)}）"
+                            } else {
+                                "自动签到：《${evt.courseName}》未成功，请尽快手动签到"
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (evt.success) Color(0xFF2E7D4F) else Color(0xFFB3261E),
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = vm::refreshCourses, enabled = !state.busy) { Text("刷新课程") }
@@ -490,7 +533,9 @@ private fun HomeScreen(
                 color = Color(0xFF5B6B63),
             )
         }
-        items(state.courses, key = { it.id + it.beginTime }) { course ->
+        // key 用防撞版本：id 缺失 + 同一时段的课表数据会让 `id+beginTime` 重复，
+        // LazyColumn 直接抛异常 —— 表现为「整页打不开」（见 courseListKeys 说明）。
+        itemsIndexed(state.courses, key = { index, _ -> homeCourseKeys[index] }) { _, course ->
             CourseRow(
                 course = course,
                 selected = state.selected?.id == course.id,
@@ -1103,6 +1148,41 @@ private fun openReleasePage(context: Context, release: UpdateRelease) {
 
 @Composable
 /**
+ * 「签到记录」入口。
+ *
+ * ## 为什么排在「签到日志」**之前**
+ * 两者都在设置里，但这一张回答的是用户**自己**的问题（「我签上了没有」），
+ * 而日志回答的是维护者的问题（「为什么没签上」）。日常要翻的是前者，
+ * 因此它必须更靠前 —— 用户翻设置时先看到的那张，就是他以为的默认入口。
+ *
+ * ## 为什么说明里要点出「讲座」
+ * 讲座不在课表里、学校系统也查不到「我签过哪些讲座」（见
+ * `docs/lecture-signin-research.md` §10.18），所以这份记录是回看讲座签到的
+ * 唯一途径。这件事不写出来，用户不会知道该来这儿找。
+ */
+private fun SignRecordCard(onOpen: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("签到记录", fontWeight = FontWeight.Bold)
+            Text(
+                "每次签到成功或失败都会留一条：时间、来源、提交的编号、学校的结果。" +
+                    "讲座不在课表里、学校系统也查不到，这份本机记录是回看「我签了哪些讲座」的唯一途径。",
+                fontSize = 12.sp,
+                color = Color(0xFF5B6B63),
+                lineHeight = 18.sp,
+            )
+            TextButton(onClick = onOpen, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                Text("查看 / 分享记录")
+            }
+        }
+    }
+}
+
+@Composable
+/**
  * 「签到日志」入口。
  *
  * 刻意放在「保活」之后、「版本与更新」之前：它不是日常要用的功能，
@@ -1136,6 +1216,7 @@ private fun SettingsScreen(
     vm: MainViewModel,
     onBack: () -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenRecords: () -> Unit,
 ) {
     val activity = LocalContext.current as? ComponentActivity
     // 每次回到前台都重新核对保活状态，并借机重试一次守护服务（冷启动时可能被系统拒绝）。
@@ -1188,6 +1269,7 @@ private fun SettingsScreen(
         item { AutoSignCard(state, vm) }
         item { AutoSignExcludeCard(state, vm) }
         item { KeepAliveCard(state, vm) }
+        item { SignRecordCard(onOpenRecords) }
         item { SignLogCard(onOpenLogs) }
         item { UpdateCard(state, vm) }
         item {
@@ -1411,7 +1493,9 @@ private fun AutoSignCard(state: AppUiState, vm: MainViewModel) {
  */
 @Composable
 private fun AutoSignExcludeCard(state: AppUiState, vm: MainViewModel) {
-    var showPicker by remember { mutableStateOf(false) }
+    // rememberSaveable：旋屏 / 进程重建后弹窗不丢（remember 会在重建时清零，
+    // 用户正选到一半的弹窗凭空消失，看起来就像「点了没反应」）。
+    var showPicker by rememberSaveable { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(containerColor = Color.White),
         shape = RoundedCornerShape(16.dp),
@@ -1429,6 +1513,15 @@ private fun AutoSignExcludeCard(state: AppUiState, vm: MainViewModel) {
                 color = Color(0xFF0F6B4C),
                 fontWeight = FontWeight.Medium,
             )
+            // 写入失败必须可见：静默失败时用户点开关毫无反应，只会以为应用坏了。
+            state.exclusionNotice?.let { notice ->
+                Text(
+                    notice,
+                    fontSize = 12.sp,
+                    color = Color(0xFFB3261E),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             if (state.courses.isEmpty()) {
                 Text(
                     "今日课程尚未加载：请先在首页点「刷新课程」，再来选择。",
@@ -1468,13 +1561,16 @@ private fun ExcludeCourseDialog(
             if (state.courses.isEmpty()) {
                 Text("今日暂无课程。请先在首页刷新课程后再设置。", fontSize = 13.sp)
             } else {
+                // key 用防撞版本：id 缺失 + 同一时段的数据形态会让旧 key 重复，
+                // 弹窗直接打不开（见 courseListKeys 说明）。
+                val keys = remember(state.courses) { courseListKeys(state.courses) }
                 LazyColumn(
                     // 上限而不是固定高度：课程少时弹窗紧凑，课程多时内部滚动，
                     // 不会把「完成」按钮顶出屏幕。
                     modifier = Modifier.heightIn(max = 420.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(state.courses, key = { it.id + it.beginTime }) { course ->
+                    itemsIndexed(state.courses, key = { index, _ -> keys[index] }) { _, course ->
                         ExcludeCourseRow(course, state, vm)
                     }
                 }
@@ -1554,6 +1650,25 @@ private fun KeepAliveCard(state: AppUiState, vm: MainViewModel) {
             if (ka.daemonBlocked) {
                 Text(
                     stringResource(R.string.keepalive_alert_daemon_blocked),
+                    fontSize = 12.sp,
+                    color = Color(0xFFB42318),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            // 本机时钟偏差：闹钟按本机钟排、timestamp 按学校钟发，本机不准两者一起偏
+            // —— 这是「不同机型上自动签到时好时坏」「时间戳传入异常」的经典成因
+            //（手动改过时间 / 双时钟 ROM / NITZ 没同步）。偏差超 90 秒才提示，
+            // 且只在有校时样本时判定：宁缺毋滥。
+            ka.deviceClockSkewMs?.takeIf { Math.abs(it) > 90_000L }?.let { skew ->
+                val minutes = (Math.abs(skew) / 60_000L).coerceAtLeast(1)
+                Text(
+                    if (skew > 0) {
+                        "本机时钟比学校时间快约 $minutes 分钟：签到闹钟与提交的时间戳都会随之偏移" +
+                            "（「时间戳传入异常」的常见成因）。建议开启系统「自动设置时间」后重试。"
+                    } else {
+                        "本机时钟比学校时间慢约 $minutes 分钟：签到闹钟与提交的时间戳都会随之偏移。" +
+                            "建议开启系统「自动设置时间」后重试。"
+                    },
                     fontSize = 12.sp,
                     color = Color(0xFFB42318),
                     fontWeight = FontWeight.Medium,

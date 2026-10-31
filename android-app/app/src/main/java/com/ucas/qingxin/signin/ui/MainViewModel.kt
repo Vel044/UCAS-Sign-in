@@ -5,7 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ucas.qingxin.signin.QingxinApp
 import com.ucas.qingxin.signin.BuildConfig
+import com.ucas.qingxin.signin.attendance.AutoSignEngine
 import com.ucas.qingxin.signin.attendance.AutoSignExclusions
+import com.ucas.qingxin.signin.attendance.AutoSignOutcomeEvent
 import com.ucas.qingxin.signin.attendance.AutoSignRandomizer
 import com.ucas.qingxin.signin.data.AttendanceUiStatus
 import com.ucas.qingxin.signin.data.Course
@@ -28,6 +30,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -67,6 +70,13 @@ data class AppUiState(
     val excludedToday: Set<String> = emptySet(),
     /** 自动打卡排除名单：**长期不打卡**的课程键。 */
     val excludedPermanent: Set<String> = emptySet(),
+    /**
+     * 排除名单写入的异常提示（null = 正常）。
+     *
+     * 排除写入在任何一步失败都必须**可见**：旧实现静默吞掉，用户点开关没反应
+     * 还以为是应用坏了（「开不了 / 开了关不掉」反馈的成因之一）。
+     */
+    val exclusionNotice: String? = null,
     /** 版本检查与更新提示。 */
     val update: UpdateUiState = UpdateUiState(),
     /**
@@ -77,6 +87,14 @@ data class AppUiState(
      * 界面只能在「正在同步…」的转圈里干等，看起来像卡住了。
      */
     val qrStandby: QrStandbyReason = QrStandbyReason.NONE,
+    /**
+     * 最近一次自动签到的终态（进程内，见 [AutoSignOutcomeEvent]）。
+     *
+     * 主页课程卡片据此显示一行结果 —— 这是「应用正开着」时的触达渠道；
+     * 应用不在前台时由通知栏负责。1.3.6 的反馈「自动签成后主页毫无表示」
+     * 正是缺了这一条（以及下方对课程数据流的订阅）。
+     */
+    val autoSignEvent: AutoSignOutcomeEvent? = null,
 )
 
 /** 二维码的待机原因，决定卡片上的文案。 */
@@ -207,6 +225,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             studentNoInput = app.credentialStore.getLoginId().orEmpty(),
                         )
                     }
+                }
+            }
+            // 后台自动签成会经 loadToday 写入 CourseRepository.courses（「今天」的
+            // 唯一真值源）。主页若不订阅它，开着应用时课表纹丝不动 —— 用户得手动
+            // 点「刷新课程」才能发现「原来已经签上了」。订阅后「已签到」角标实时跟上。
+            viewModelScope.launch {
+                app.courseRepository.courses.collect { result ->
+                    if (result == null) return@collect
+                    _ui.update { it.copy(courses = result.courses, fromCache = result.fromCache) }
+                    refreshScheduleLabels()
+                    refreshSelectedStatus()
+                }
+            }
+            // 自动签到终态：主页直接展示「成功 / 失败」，不再只靠通知栏。
+            viewModelScope.launch {
+                AutoSignEngine.lastOutcome.collect { event ->
+                    if (event != null) _ui.update { it.copy(autoSignEvent = event) }
                 }
             }
         }
@@ -537,21 +572,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 不重排就会在那节课上白白醒一次（并且真的签上去）。
      */
     fun setExcludeToday(course: Course, excluded: Boolean) {
-        if (!app.isReady) return
-        val today = AutoSignRandomizer.todayKey()
+        if (!app.isReady) {
+            _ui.update { it.copy(exclusionNotice = "应用尚未初始化完成，请重启应用后再试") }
+            return
+        }
         val key = AutoSignExclusions.courseKey(course)
-        runCatching { app.autoSignExclusionStore.setExcludedToday(key, today, excluded) }
-        _ui.update { it.copy(excludedToday = readExclusions().first) }
+        runCatching {
+            app.autoSignExclusionStore.setExcludedToday(key, AutoSignRandomizer.todayKey(), excluded)
+        }
+        reconcileExclusions(key, wantToday = excluded, wantPermanent = null)
         afterExclusionsChanged()
     }
 
     /** 把一门课加入 / 移出「长期不自动打卡」名单。 */
     fun setExcludePermanent(course: Course, excluded: Boolean) {
-        if (!app.isReady) return
+        if (!app.isReady) {
+            _ui.update { it.copy(exclusionNotice = "应用尚未初始化完成，请重启应用后再试") }
+            return
+        }
         val key = AutoSignExclusions.courseKey(course)
         runCatching { app.autoSignExclusionStore.setPermanent(key, excluded) }
-        _ui.update { it.copy(excludedPermanent = readExclusions().second) }
+        reconcileExclusions(key, wantToday = null, wantPermanent = excluded)
         afterExclusionsChanged()
+    }
+
+    /**
+     * 写后核对：从存储**重读**实际状态，与本次期望不符就给出可见的失败提示。
+     *
+     * 旧实现写完直接信状态更新，「写没写上」无从知晓 —— 排除功能最恶劣的失败
+     * 形态恰恰是静默的：用户以为排除了，课照签；以为取消了，课不签。
+     */
+    private fun reconcileExclusions(
+        courseKey: String,
+        wantToday: Boolean?,
+        wantPermanent: Boolean?,
+    ) {
+        val actual = readExclusions()
+        val problems = buildList {
+            if (wantToday != null && (courseKey in actual.first) != wantToday) {
+                add(if (wantToday) "「今日跳过」写入失败" else "「今日跳过」取消失败")
+            }
+            if (wantPermanent != null && (courseKey in actual.second) != wantPermanent) {
+                add(if (wantPermanent) "「长期不打卡」写入失败" else "「长期不打卡」取消失败")
+            }
+        }
+        _ui.update {
+            it.copy(
+                excludedToday = actual.first,
+                excludedPermanent = actual.second,
+                exclusionNotice = problems.joinToString("；").ifEmpty { null },
+            )
+        }
     }
 
     /**
@@ -563,9 +634,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun afterExclusionsChanged() {
         val context = getApplication<Application>()
-        runCatching { com.ucas.qingxin.signin.attendance.AttendanceScheduler.ensureSchedule(context) }
-        if (!_ui.value.settings.autoSignEnabled) return
+        // 重排**必须在 IO 线程**：planToday（读 SharedPreferences 与课表缓存）+
+        // 三路闹钟 IPC + WorkManager 入队在低端机上是可感知的主线程停顿 ——
+        // 状态更新后的那一帧被阻塞，选中态迟迟画不出来，用户看到的就是
+        // 「点了开关没反应 / 开了关不掉」。重排本身线程安全，挪走不影响语义。
         viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                com.ucas.qingxin.signin.attendance.AttendanceScheduler.ensureSchedule(context)
+            }
+            if (!_ui.value.settings.autoSignEnabled) return@launch
             runCatching {
                 com.ucas.qingxin.signin.attendance.AutoSignEngine
                     .refreshDaemonStatus(context, app, null)
@@ -816,6 +893,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (qrChanged) {
             startQrLoopIfNeeded(force = true)
+        }
+    }
+
+    /**
+     * 按「最新课程列表」重算当前选中课的状态行。
+     *
+     * 自动签成只把 `signed` 翻成 true，课次 id 不变 —— [refreshScheduleLabels] 的
+     * 「变化才更新」判定感知不到它。这里单独刷一次 `status`，让主页「状态：已签到」
+     * 与后台签成同步，而不是等下一次手动刷新。
+     */
+    private fun refreshSelectedStatus() {
+        if (!_ui.value.authenticated) return
+        val selected = _ui.value.selected ?: return
+        val fresh = _ui.value.courses.firstOrNull { it.id == selected.id } ?: selected
+        _ui.update {
+            it.copy(
+                status = app.attendanceRepository.uiStatus(
+                    fresh,
+                    app.qrTimeline.currentSchoolTimeOrNull() ?: System.currentTimeMillis(),
+                ),
+            )
         }
     }
 

@@ -36,7 +36,7 @@ local.properties
 *.ap_
 !releases/
 releases/*.apk
-!releases/qingxin-signin-1.3.2-release.apk
+!releases/qingxin-signin-1.4.0-release.apk
 android-app/app/release/
 dist/
 
@@ -57,6 +57,16 @@ tools/out/
 # —— 这些文件里含校内主机名与端口，且非本项目产物，绝不入库
 .cursor/_probe_tmp/
 .research_readonly/
+
+# 现场失败记录（用户从应用里导出的那一份）
+# —— 里面有二维码原文：含校内主机、端口与真实的 timeTableId，按隐私红线不入库。
+#    它只作为**本地**归因材料（见 docs/lecture-signin-research.md §10.19 / §10.20）。
+docs/sign-records.txt
+
+# 扫码基准（android-app/tools/scan-bench/QrBench.java）的编译产物：
+# 源码入库（它是 §10.20 全部数字的来源，要可复现），跑一次产生的这些不要入库。
+android-app/tools/scan-bench/merged/
+android-app/tools/scan-bench/*.class
 
 # iOS local settings, caches, signing and build products
 ios-app/.build/

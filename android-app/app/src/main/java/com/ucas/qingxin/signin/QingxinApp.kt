@@ -14,11 +14,13 @@ import com.ucas.qingxin.signin.attendance.ResolvedPowerProfile
 import com.ucas.qingxin.signin.auth.AuthRepository
 import com.ucas.qingxin.signin.auth.SecureCredentialStore
 import com.ucas.qingxin.signin.course.CourseRepository
+import com.ucas.qingxin.signin.history.SignRecordStore
 import com.ucas.qingxin.signin.lecture.LectureNoticeService
 import com.ucas.qingxin.signin.lecture.LectureRepository
 import com.ucas.qingxin.signin.lecture.LectureScheduleStore
 import com.ucas.qingxin.signin.logging.SignLog
 import com.ucas.qingxin.signin.network.QingxinApiService
+import com.ucas.qingxin.signin.qr.ClockCalibrationStore
 import com.ucas.qingxin.signin.qr.QrTimelineManager
 import com.ucas.qingxin.signin.update.UpdateCheckStore
 import com.ucas.qingxin.signin.update.UpdateService
@@ -45,6 +47,14 @@ class QingxinApp : Application() {
      * API 层是唯一能看到学校响应正文的地方（见 `QingxinApiService.log`）。
      */
     lateinit var signLog: SignLog
+        private set
+    /**
+     * 本机签到历史（用户可读的「我签到了什么」）。
+     *
+     * 与 [signLog] 同级、同样在 [buildDependencies] 里先于 [attendanceRepository] 构造 ——
+     * 后者是全部签到路径的唯一收口，每条记录都从那里进来。
+     */
+    lateinit var signRecords: SignRecordStore
         private set
     lateinit var credentialStore: SecureCredentialStore
         private set
@@ -189,6 +199,7 @@ class QingxinApp : Application() {
     private fun buildDependencies() {
         // 诊断日志优先构造：它不依赖任何其他组件，而其余组件都要往里记东西。
         signLog = SignLog(File(filesDir, "logs"))
+        signRecords = SignRecordStore(File(filesDir, "records"))
         api = QingxinApiService(log = signLog)
         credentialStore = SecureCredentialStore(this)
         authRepository = AuthRepository(api, credentialStore)
@@ -196,8 +207,8 @@ class QingxinApp : Application() {
         // 讲座通知只依赖公开的人文学院网站数据源，不需要登录态，也不参与签到。
         // 构造不需要 Context：列表**不做本地缓存**，每次刷新都直接抓网页。
         lectureRepository = LectureRepository(LectureNoticeService())
-        qrTimeline = QrTimelineManager(api)
-        attendanceRepository = AttendanceRepository(api, authRepository, courseRepository, qrTimeline)
+        qrTimeline = QrTimelineManager(api, ClockCalibrationStore(this))
+        attendanceRepository = AttendanceRepository(api, authRepository, courseRepository, qrTimeline, signRecords)
         attendanceScheduler = AttendanceScheduler(this)
         autoSignExclusionStore = AutoSignExclusionStore(this)
         // 讲座时间表（预约系统）的本机存档；只存讲座内容，不存任何登录凭据。

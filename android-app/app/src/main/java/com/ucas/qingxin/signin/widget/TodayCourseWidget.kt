@@ -15,6 +15,7 @@ import com.ucas.qingxin.signin.QingxinApp
 import com.ucas.qingxin.signin.R
 import com.ucas.qingxin.signin.data.AttendanceUiStatus
 import com.ucas.qingxin.signin.data.Course
+import com.ucas.qingxin.signin.history.SignSource
 import com.ucas.qingxin.signin.ui.MainActivity
 import com.ucas.qingxin.signin.util.CourseTimeDisplay
 import kotlinx.coroutines.CoroutineScope
@@ -677,7 +678,9 @@ internal object WidgetUpdater {
         val (current, _) = app.courseRepository.currentAndNext(query?.courses.orEmpty(), now)
         if (current == null) return "当前没有可签到课程"
         if (current.signed) return "「${current.name}」已签到"
-        val result = runCatching { app.attendanceRepository.signOneClick(current) }.getOrNull()
+        val result = runCatching {
+            app.attendanceRepository.signOneClick(current, SignSource.WIDGET)
+        }.getOrNull()
         runCatching { app.courseRepository.loadToday() }
         return result?.message ?: "签到请求已发送"
     }

@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  日志分享放行的目录。
+  分享放行的目录（签到日志 + 签到记录导出）。
 
-  只放行 logs/ 一个子目录：分享出去的 content:// URI 无法越出这里，
+  只放行这两个子目录：分享出去的 content:// URI 无法越出它们，
   因此即便别处出了漏洞，也读不到私有目录里的其他文件（凭据、缓存、课程数据）。
+  新增分享来源时必须回到这里加一行 —— 否则 FileProvider 会直接抛
+  IllegalArgumentException，而不是悄悄放行一个更宽的目录。
 -->
 <paths>
     <files-path
         name="logs"
         path="logs/" />
+    <files-path
+        name="records-export"
+        path="records-export/" />
 </paths>

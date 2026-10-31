@@ -39,6 +39,18 @@ enum class SignOutcome {
     QR_EXPIRED,
     OUTSIDE_SIGN_WINDOW,
     SIGN_RESULT_UNKNOWN,
+
+    /**
+     * 学校判定 `timestamp` 参数异常（实测原话「时间戳传入异常！」，`ERRCODE=100`）。
+     *
+     * 与 [QR_EXPIRED]（值太旧）不同：这一种在校时样本**偏离**时出现 —— 同一会话
+     * 几秒内成败交错（2026-10-22 现场记录：连按 8 次，前 7 次此错、第 8 次成功），
+     * 说明学校比的是「我们的校时样本」与「它自己的钟」的偏差，而不是新鲜度。
+     * 因此它是一等公民而不是 [OUTSIDE_SIGN_WINDOW] 下的一个字符串分支：
+     * 提交层会据此**强制重取校时并立刻重试一次**（见
+     * `AttendanceRepository.performSign`）。
+     */
+    TIMESTAMP_REJECTED,
 }
 
 data class SignResult(
@@ -47,6 +59,18 @@ data class SignResult(
     val status: String,
     val errCode: String,
     val stuSignId: String,
+    /**
+     * 学校回给我们的**原始**提示（未经过 [message] 那层人话改写），可为空串。
+     *
+     * ## 为什么必须单独留一份（2026-10-19 补记）
+     * 学校的拒绝理由短而含糊，而我们的 [message] 会把 `OUTSIDE_SIGN_WINDOW` 这一整桶
+     * 都写成「请确认上课时间和课程状态」—— 这句话是我们自己编的，**学校的原话被丢掉了**。
+     * 第一份「扫码仍不成功」的现场记录（`docs/sign-records.txt`）因此只剩我们那句泛泛的
+     * 转述，无从判断学校到底在拒绝什么（是码不对、是窗口没开、还是没有这门课）。
+     *
+     * 留着它，现场失败才能被**离线**读懂；它不含身份信息，可以安全地进记录与分享。
+     */
+    val schoolMessage: String = "",
 )
 
 enum class AttendanceUiStatus {
@@ -101,4 +125,13 @@ data class KeepAliveState(
     val estimatedWakeupsToday: Int = 0,
     /** 系统是否处于省电模式（只收紧重试预算与小部件秒级重绘，不改用户档位）。 */
     val systemPowerSave: Boolean = false,
+    /**
+     * 本机时钟相对学校时间的偏差（毫秒，正 = 本机快）。
+     *
+     * 闹钟按本机钟排、timestamp 按学校钟发 —— 本机不准时两者一起偏，
+     * 是「不同机型上自动签到时好时坏」的经典成因（手动改过时间 / 双时钟 ROM /
+     * 运营商 NITZ 没同步）。null = 暂无校时样本（未进签到窗口或校时不可用），
+     * 此时不判定 —— 宁可没有结论，不给一个误导性的数字。
+     */
+    val deviceClockSkewMs: Long? = null,
 )
