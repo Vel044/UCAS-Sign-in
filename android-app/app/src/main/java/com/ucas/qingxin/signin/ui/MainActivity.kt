@@ -112,6 +112,7 @@ import java.time.ZoneOffset
 private enum class AppScreen {
     Home,
     Schedule,
+    SchoolAttendance,
     Lecture,
     LectureSchedule,
     Manual,
@@ -132,6 +133,7 @@ class MainActivity : ComponentActivity() {
      * 因此不需要（也不应该）与 [MainViewModel] 共享任何状态。
      */
     private val scheduleVm: ScheduleViewModel by viewModels()
+    private val schoolAttendanceVm: SchoolAttendanceViewModel by viewModels()
 
     /**
      * 手动打卡页的 ViewModel。
@@ -187,7 +189,9 @@ class MainActivity : ComponentActivity() {
             val subScreen = state.authenticated && screen != AppScreen.Home
             // 系统返回键 / 手势返回：在子页面应回到首页，而不是直接退出 App。
             // 弹窗（AlertDialog）自带更高的返回优先级，会先关掉弹窗，不受此处影响。
-            BackHandler(enabled = subScreen) { screen = AppScreen.Home }
+            BackHandler(enabled = subScreen) {
+                screen = if (screen == AppScreen.SchoolAttendance) AppScreen.Schedule else AppScreen.Home
+            }
             QingxinTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
                     Box(Modifier.padding(padding).fillMaxSize()) {
@@ -246,6 +250,12 @@ class MainActivity : ComponentActivity() {
                                 state = scheduleState,
                                 vm = scheduleVm,
                                 onBack = { screen = AppScreen.Home },
+                                onOpenAttendance = { screen = AppScreen.SchoolAttendance },
+                            )
+                            screen == AppScreen.SchoolAttendance -> SchoolAttendanceScreen(
+                                studentNo = state.studentNo,
+                                vm = schoolAttendanceVm,
+                                onBack = { screen = AppScreen.Schedule },
                             )
                             else -> HomeScreen(
                                 state = state,
@@ -687,6 +697,7 @@ private fun ScheduleScreen(
     state: ScheduleUiState,
     vm: ScheduleViewModel,
     onBack: () -> Unit,
+    onOpenAttendance: () -> Unit,
 ) {
     // 每次进入本页都重取一次：缓存优先渲染，网络结果随后覆盖。
     // 这样退出登录换账号后不需要任何额外的失效逻辑。
@@ -710,6 +721,7 @@ private fun ScheduleScreen(
                 )
             }
         }
+        item { OutlinedButton(onClick = onOpenAttendance) { Text("学校签到历史") } }
         item { ScheduleDateCard(state, vm) }
         item { ScheduleNoticeCard(state) }
         item { ScheduleSummary(state, vm) }

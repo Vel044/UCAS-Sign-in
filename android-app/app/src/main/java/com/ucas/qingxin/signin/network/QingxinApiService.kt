@@ -1,6 +1,12 @@
 package com.ucas.qingxin.signin.network
 
 import com.ucas.qingxin.signin.BuildConfig
+import com.ucas.qingxin.signin.course.AttendanceCatalogCourse
+import com.ucas.qingxin.signin.course.AttendanceLesson
+import com.ucas.qingxin.signin.course.AttendanceTerm
+import com.ucas.qingxin.signin.course.SchoolAttendanceEntry
+import com.ucas.qingxin.signin.course.SchoolAttendanceReport
+import com.ucas.qingxin.signin.course.SchoolSignState
 import com.ucas.qingxin.signin.data.Course
 import com.ucas.qingxin.signin.data.CourseQueryResult
 import com.ucas.qingxin.signin.data.SchoolSession
@@ -15,7 +21,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
@@ -88,6 +98,8 @@ class QingxinApiService(
 
         /** `yyyyMMdd` 的长度，用于判定日期字段是否可用。 */
         private const val DAY_KEY_LENGTH = 8
+        private val ATTENDANCE_SESSION_EXPIRED =
+            Regex("未登录|重新登录|登录.*(失效|过期)|session.*(invalid|expired)", RegexOption.IGNORE_CASE)
 
         fun defaultClient(): OkHttpClient =
             OkHttpClient.Builder()
@@ -234,6 +246,108 @@ class QingxinApiService(
             }
             out
         }
+
+    internal suspend fun getAttendanceWeek(session: SchoolSession, monday: LocalDate): List<AttendanceLesson> =
+        withContext(Dispatchers.IO) {
+            val sunday = monday.plusDays(6)
+            val json = readAttendanceJson(session, "course/get_stu_course_sched_week.action",
+                "id" to session.userId, "dateStr" to monday.format(DateTimeFormatter.BASIC_ISO_DATE))
+            val dates = json.attendanceRows(requireSuccess = false)
+            var matchedWeek = false
+            val lessons = dates.flatMap { row ->
+                val date = schoolDay(row.optText("dateStr"))
+                if (date !in monday..sunday) return@flatMap emptyList()
+                matchedWeek = true
+                if (row.isNull("schedData")) return@flatMap emptyList()
+                val entries = row.optJSONArray("schedData") ?: attendanceDataError()
+                entries.objects().map {
+                    val course = parseScheduledCourse(it, date.format(DateTimeFormatter.BASIC_ISO_DATE))
+                        .copy(id = it.optText("id"), uuid = it.optText("uuid"), signed = false)
+                    AttendanceLesson(course, date, classroom = it.optText("classroomName"))
+                }
+            }
+            if (dates.isNotEmpty() && !matchedWeek) attendanceDataError()
+            lessons
+        }
+
+    internal suspend fun getAttendanceTerms(session: SchoolSession): List<AttendanceTerm> =
+        withContext(Dispatchers.IO) {
+            readAttendanceJson(session, "course/get_base_school_year.action", "userId" to session.userId, "type" to "2")
+                .attendanceRows().map { row ->
+                    val id = row.optText("code")
+                    val start = schoolDay(row.optText("beginDate"))
+                    val end = schoolDay(row.optText("endDate"))
+                    if (id.isBlank() || end < start) attendanceDataError()
+                    AttendanceTerm(id, start..end)
+                }
+        }
+
+    internal suspend fun getAttendanceCatalog(session: SchoolSession, term: AttendanceTerm): List<AttendanceCatalogCourse> =
+        withContext(Dispatchers.IO) {
+            val json = readAttendanceJson(session, "choosecourse/get_myall_course.action?user_type=1",
+                "id" to session.userId, "xq_code" to term.id)
+            val courses = json.attendanceRows()
+            if (json.optInt("total", courses.size) > courses.size) attendanceDataError()
+            courses.map { row ->
+                val id = row.optText("course_id")
+                val name = row.optText("course_name")
+                val semester = row.optText("semesterId")
+                if (id.isBlank() || name.isBlank() || (semester.isNotBlank() && semester != term.id)) attendanceDataError()
+                AttendanceCatalogCourse(id, row.optText("courseNum"), name)
+            }
+        }
+
+    internal suspend fun getCourseAttendance(session: SchoolSession, courseId: String): SchoolAttendanceReport =
+        withContext(Dispatchers.IO) {
+            val json = readAttendanceJson(session, "my/get_my_course_sign_detail.action",
+                "id" to session.userId, "courseId" to courseId)
+            val entries = json.attendanceRows().map { row ->
+                val scheduleId = row.optText("courseSchedId")
+                if (scheduleId.isBlank() || row.optText("courseId") != courseId) attendanceDataError()
+                val status = when (row.optText("signStatus")) {
+                    "1" -> SchoolSignState.Signed
+                    "0" -> SchoolSignState.Unsigned
+                    else -> SchoolSignState.Unknown
+                }
+                SchoolAttendanceEntry(scheduleId, schoolDay(row.optText("teachTime")),
+                    row.optText("classBeginTime"), row.optText("classEndTime"), status)
+            }
+            SchoolAttendanceReport(courseId, json.optText("mySignNum").toIntOrNull()?.takeIf { it >= 0 }, entries)
+        }
+
+    private fun readAttendanceJson(session: SchoolSession, path: String, vararg fields: Pair<String, String>): JSONObject {
+        val form = FormBody.Builder()
+        fields.forEach { (key, value) -> form.add(key, value) }
+        val request = requestBuilder(path, session).post(form.build()).build()
+        val json = try {
+            executeJson(request)
+        } catch (_: JSONException) {
+            attendanceDataError()
+        }
+        val message = listOf("ERRMSG", "msg", "message").joinToString(" ") { json.optText(it) }
+        if (json.optText("ERRCODE") in setOf("401", "403", "LOGIN_EXPIRED", "SESSION_EXPIRED") ||
+            ATTENDANCE_SESSION_EXPIRED.containsMatchIn(message)
+        ) throw ApiException("LOGIN_EXPIRED", "登录已失效，请重新登录")
+        return json
+    }
+
+    private fun JSONObject.attendanceRows(requireSuccess: Boolean = true): List<JSONObject> {
+        if (requireSuccess && optString("STATUS") != "0") attendanceDataError()
+        return optJSONArray("result")?.objects() ?: attendanceDataError()
+    }
+
+    private fun JSONArray.objects(): List<JSONObject> = List(length()) {
+        optJSONObject(it) ?: attendanceDataError()
+    }
+
+    private fun schoolDay(raw: String): LocalDate = try {
+        LocalDate.parse(normalizeDayKey(raw), DateTimeFormatter.BASIC_ISO_DATE)
+    } catch (_: DateTimeParseException) {
+        attendanceDataError()
+    }
+
+    private fun attendanceDataError(): Nothing =
+        throw ApiException("ATTENDANCE_DATA", "学校暂未返回可用的课表或考勤明细")
 
     /**
      * Confirmed one-click sign:
@@ -485,25 +599,24 @@ class QingxinApiService(
         val out = ArrayList<Course>(array.length())
         for (i in 0 until array.length()) {
             val o = array.optJSONObject(i) ?: continue
-            var name = o.optString("courseName").trim()
-            if (name.isEmpty()) name = "未命名课程"
-            out += Course(
-                id = o.optString("id").trim(),
-                uuid = o.optString("uuid").trim(),
-                name = name,
-                teacher = o.optString("teacherName").trim(),
-                beginTime = o.optString("classBeginTime").trim(),
-                endTime = o.optString("classEndTime").trim(),
-                day = day,
-                signed = o.optString("signStatus") == "1",
-                // 课程层标识：讲座发现的回退阶梯与课程注册表桥接都依赖它们。
-                // 学校返回的可能是数字也可能是字符串，optString 一并接受。
-                courseId = o.optText("courseId"),
-                courseNum = o.optText("courseNum"),
-            )
+            out += parseScheduledCourse(o, day)
         }
         return out
     }
+
+    private fun parseScheduledCourse(o: JSONObject, day: String): Course = Course(
+        id = o.optString("id").trim(),
+        uuid = o.optString("uuid").trim(),
+        name = o.optString("courseName").trim().ifBlank { "未命名课程" },
+        teacher = o.optString("teacherName").trim(),
+        beginTime = o.optString("classBeginTime").trim(),
+        endTime = o.optString("classEndTime").trim(),
+        day = day,
+        signed = o.optString("signStatus") == "1",
+        // 课程层标识与课次 id 相互独立。学校可能返回数字或字符串。
+        courseId = o.optText("courseId"),
+        courseNum = o.optText("courseNum"),
+    )
 
     /**
      * 读取字符串字段，并把「显式 null / 缺失」统一成空串。
