@@ -117,11 +117,7 @@ public struct QingxinAPI: Sendable {
         let daily = try await json(request(path: "course/get_stu_course_sched.action", form: form, session: session))
         let list = Self.parseCourses(daily["result"], day: dateKey)
         if Self.text(daily["STATUS"]) == "0", !list.isEmpty { return CourseQuery(courses: list, fromWeeklyFallback: false) }
-        let weekly = try await json(request(path: "course/get_stu_course_sched_week.action", form: form, session: session))
-        // Upstream documents inconsistent STATUS semantics for this endpoint. A real result array is authoritative.
-        guard let days = weekly["result"] as? [[String: Any]] else {
-            throw QingxinError.invalidResponse("学校暂未返回可用课表，请重新查询")
-        }
+        let days = try await weeklySchedule(session: session, dateKey: dateKey)
         let all = days.flatMap { day -> [Course] in
             let key = SchoolDate.normalize(Self.text(day["dateStr"]))
             guard key.count == 8 else { return [] }
@@ -129,6 +125,119 @@ public struct QingxinAPI: Sendable {
         }
         let today = all.filter { $0.day == dateKey }
         return CourseQuery(courses: today.isEmpty ? all : today, fromWeeklyFallback: today.isEmpty && !all.isEmpty)
+    }
+
+    private func weeklySchedule(session: SchoolSession, dateKey: String) async throws -> [[String: Any]] {
+        let form = [("id", session.userId), ("dateStr", dateKey)]
+        let weekly = try await json(request(path: "course/get_stu_course_sched_week.action", form: form, session: session))
+        // Upstream documents inconsistent STATUS semantics for this endpoint.
+        guard let days = weekly["result"] as? [[String: Any]] else {
+            throw QingxinError.invalidResponse("学校暂未返回可用课表，请重新查询")
+        }
+        return days
+    }
+
+    public func attendanceWeek(session: SchoolSession, days: ClosedRange<String>) async throws -> [AttendanceRecord] {
+        let schedule = try await weeklySchedule(session: session, dateKey: days.lowerBound)
+        var matchedWeek = false
+        var records: [AttendanceRecord] = []
+        for day in schedule {
+            let key = SchoolDate.normalize(Self.text(day["dateStr"]))
+            guard let date = SchoolDate.instant(day: key, time: "00:00"), SchoolDate.key(date) == key else {
+                throw QingxinError.invalidResponse("学校返回的课表日期无法识别")
+            }
+            guard days.contains(key) else { continue }
+            matchedWeek = true
+            guard let value = day["schedData"], !(value is NSNull) else { continue }
+            guard let rows = value as? [[String: Any]] else {
+                throw QingxinError.invalidResponse("学校返回的课程数据无法识别")
+            }
+            records += rows.map {
+                AttendanceRecord(course: Self.parseCourse($0, day: key), status: .unknown,
+                                 classroom: Self.text($0["classroomName"]))
+            }
+        }
+        guard matchedWeek || schedule.isEmpty else {
+            throw QingxinError.invalidResponse("学校返回的课表不在所查询的这一周内")
+        }
+        return records
+    }
+
+    public func attendanceTerms(session: SchoolSession) async throws -> [AttendanceTerm] {
+        let request = try request(path: "course/get_base_school_year.action",
+                                  form: [("userId", session.userId), ("type", "2")], session: session)
+        let response = try await json(request)
+        guard Self.text(response["STATUS"]) == "0", let rows = response["result"] as? [[String: Any]] else {
+            throw QingxinError.invalidResponse("学校未返回可用学期")
+        }
+        return try rows.map { row in
+            let id = Self.text(row["code"])
+            let from = SchoolDate.normalize(Self.text(row["beginDate"]))
+            let through = SchoolDate.normalize(Self.text(row["endDate"]))
+            guard !id.isEmpty, SchoolDate.instant(day: from, time: "00:00") != nil,
+                  SchoolDate.instant(day: through, time: "00:00") != nil, from <= through else {
+                throw QingxinError.invalidResponse("学校返回的学期日期无法识别")
+            }
+            return AttendanceTerm(id: id, days: from...through)
+        }
+    }
+
+    public func attendanceCatalog(session: SchoolSession, term: AttendanceTerm) async throws -> [AttendanceCatalogCourse] {
+        let request = try request(path: "choosecourse/get_myall_course.action",
+                                  form: [("id", session.userId), ("xq_code", term.id)], session: session,
+                                  query: [URLQueryItem(name: "user_type", value: "1")])
+        let response = try await json(request)
+        guard Self.text(response["STATUS"]) == "0", let rows = response["result"] as? [[String: Any]],
+              (Int(Self.scalar(response["total"])) ?? rows.count) <= rows.count else {
+            throw QingxinError.invalidResponse("学校未返回完整选课目录")
+        }
+        return try rows.map { row in
+            let id = Self.text(row["course_id"])
+            let name = Self.text(row["course_name"])
+            let termID = Self.text(row["semesterId"])
+            guard !id.isEmpty, !name.isEmpty, termID.isEmpty || termID == term.id else {
+                throw QingxinError.invalidResponse("学校返回的选课目录无法关联到该学期")
+            }
+            return AttendanceCatalogCourse(id: id, number: Self.text(row["courseNum"]), name: name)
+        }
+    }
+
+    public func courseAttendance(session: SchoolSession, courseId: String) async throws -> CourseAttendanceReport {
+        guard !courseId.isEmpty else { throw QingxinError.invalidResponse("课表缺少学校课程编号") }
+        let form = [("id", session.userId), ("courseId", courseId)]
+        let response = try await json(request(path: "my/get_my_course_sign_detail.action", form: form, session: session))
+        if ["401", "403", "LOGIN_EXPIRED", "SESSION_EXPIRED"].contains(Self.text(response["ERRCODE"])) {
+            throw QingxinError.sessionExpired
+        }
+        guard Self.text(response["STATUS"]) == "0", let rows = response["result"] as? [[String: Any]] else {
+            throw QingxinError.invalidResponse("学校暂未返回该课程的签到明细")
+        }
+        let lessons = try rows.map { row in
+            let scheduleId = Self.text(row["courseSchedId"])
+            let day = SchoolDate.normalize(Self.text(row["teachTime"]))
+            guard Self.text(row["courseId"]) == courseId, !scheduleId.isEmpty,
+                  let date = SchoolDate.instant(day: day, time: "00:00"), SchoolDate.key(date) == day else {
+                throw QingxinError.invalidResponse("学校返回的签到明细无法关联到该课程")
+            }
+            let status: AttendanceRecord.Status
+            switch Self.scalar(row["signStatus"]) {
+            case "1": status = .signed
+            case "0": status = .unsigned
+            default: status = .unknown
+            }
+            return CourseAttendanceReport.Lesson(scheduleId: scheduleId, day: day,
+                                                 beginTime: Self.text(row["classBeginTime"]),
+                                                 endTime: Self.text(row["classEndTime"]), status: status)
+        }
+        let total = Int(Self.scalar(response["mySignNum"]))
+        return CourseAttendanceReport(courseId: courseId,
+                                      schoolSignedTotal: total.flatMap { $0 >= 0 ? $0 : nil },
+                                      lessons: lessons)
+    }
+
+    private static func scalar(_ value: Any?) -> String {
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { return "" }
+        return text(value)
     }
     public func qrURL(code: SignCode, timestamp: Int64) throws -> URL {
         try request(path: "course/stu_scan_sign.action", query: [
@@ -158,13 +267,14 @@ public struct QingxinAPI: Sendable {
     }
     public static func parseCourses(_ value: Any?, day: String) -> [Course] {
         guard let rows = value as? [[String: Any]] else { return [] }
-        return rows.map { row in
-            let name = text(row["courseName"])
-            return Course(scheduleId: text(row["id"]), uuid: text(row["uuid"]), name: name.isEmpty ? "未命名课程" : name,
-                          teacher: text(row["teacherName"]), beginTime: text(row["classBeginTime"]),
-                          endTime: text(row["classEndTime"]), day: SchoolDate.normalize(day), signed: text(row["signStatus"]) == "1",
-                          courseId: text(row["courseId"]), courseNum: text(row["courseNum"]))
-        }
+        return rows.map { parseCourse($0, day: day) }
+    }
+    private static func parseCourse(_ row: [String: Any], day: String) -> Course {
+        let name = text(row["courseName"])
+        return Course(scheduleId: text(row["id"]), uuid: text(row["uuid"]), name: name.isEmpty ? "未命名课程" : name,
+                      teacher: text(row["teacherName"]), beginTime: text(row["classBeginTime"]),
+                      endTime: text(row["classEndTime"]), day: SchoolDate.normalize(day), signed: text(row["signStatus"]) == "1",
+                      courseId: text(row["courseId"]), courseNum: text(row["courseNum"]))
     }
     public static func parseSign(_ json: [String: Any]) -> SignResult {
         let result = json["result"] as? [String: Any] ?? [:]

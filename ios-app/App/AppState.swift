@@ -27,7 +27,7 @@ import QingxinCore
     private var autoAttempts: [String: Int] = [:]
     private var confirmedSignatures: Set<String> = []
     private var sample: ClockSample?
-    private var generation = 0
+    private(set) var generation = 0
     private var refreshSequence = 0
     private var foregroundDay = SchoolDate.key(Date())
 
@@ -108,6 +108,89 @@ import QingxinCore
         guard token == generation, session != nil else { throw CancellationError() }
         try SecureStore.save(SavedLogin(identity: login.identity, password: login.password, session: newSession), key: "login")
         return newSession
+    }
+    func loadAttendance(weeks: [ClosedRange<String>], days: ClosedRange<String>,
+                        onWeek: (ClosedRange<String>, Result<[AttendanceRecord], QingxinError>) -> Void,
+                        onReportsStarted: ([AttendanceRecord], Int) -> Void, onReport: (CourseAttendanceReport?) -> Void) async throws {
+        if demo {
+            let today = Date()
+            let term = AttendanceHistory.semesterWindow(containing: today)
+            let samples: [(Date, String, String, AttendanceRecord.Status)] = [
+                (term.lowerBound, "math", "高等数学", .signed),
+                (today, "math", "高等数学", .signed),
+                (term.upperBound, "math", "高等数学", .unsigned),
+                (term.lowerBound, "english", "学术英语", .unsigned)
+            ]
+            let records = samples.enumerated().map { index, sample in
+                let (date, id, name, status) = sample
+                let course = Course(scheduleId: String(index + 1), name: name, teacher: "示例教师", beginTime: "08:30",
+                                    endTime: "10:10", day: SchoolDate.key(date), signed: status == .signed, courseId: id)
+                return AttendanceRecord(course: course, status: status)
+            }
+            for week in weeks {
+                try Task.checkCancellation()
+                onWeek(week, .success(records.filter { week.contains($0.course.day) }))
+            }
+            return
+        }
+        guard var activeSession = session else { throw QingxinError.loginRejected }
+        let token = generation
+        let service = api
+        var renewedSession = false
+
+        func checkSession() throws {
+            try Task.checkCancellation()
+            guard token == generation else { throw CancellationError() }
+        }
+        func read<Value>(_ fetch: (SchoolSession) async throws -> Value) async throws -> Value {
+            try checkSession()
+            do {
+                return try await fetch(activeSession)
+            } catch let error as QingxinError where error.requiresReauthentication && !renewedSession {
+                try checkSession()
+                activeSession = try await reauthenticate()
+                try checkSession()
+                session = activeSession
+                renewedSession = true
+                return try await fetch(activeSession)
+            }
+        }
+
+        var schedule: [AttendanceRecord] = []
+        for week in weeks {
+            let result: Result<[AttendanceRecord], QingxinError>
+            do {
+                let records = try await read { try await service.attendanceWeek(session: $0, days: week) }
+                schedule += records.filter { days.contains($0.course.day) }
+                result = .success(records)
+            } catch QingxinError.invalidResponse(let message) {
+                result = .failure(.invalidResponse(message))
+            }
+            try checkSession()
+            onWeek(week, result)
+        }
+        let candidateDays = AttendanceHistory.daysNeedingCourseCatalog(schedule)
+        if !candidateDays.isEmpty, let terms = try? await read({ try await service.attendanceTerms(session: $0) }) {
+            var catalogs: [AttendanceTerm: [AttendanceCatalogCourse]] = [:]
+            for term in Set(terms) where candidateDays.contains(where: term.days.contains) {
+                try checkSession()
+                catalogs[term] = try? await read { try await service.attendanceCatalog(session: $0, term: term) }
+            }
+            schedule = AttendanceHistory.linkCoTeachers(schedule, terms: Array(Set(terms)), catalogs: catalogs)
+        }
+        try checkSession()
+        let courseIDs = Set(schedule.map(\.attendanceCourseID).filter { !$0.isEmpty })
+        onReportsStarted(schedule, courseIDs.count)
+        for courseID in courseIDs.sorted() {
+            let report: CourseAttendanceReport?
+            do {
+                report = try await read { try await service.courseAttendance(session: $0, courseId: courseID) }
+            } catch let error as QingxinError where !error.requiresReauthentication {
+                report = nil
+            }
+            try checkSession()
+            onReport(report)
+        }
     }
     func refresh() async {
         if demo { loadDemo(); return }
@@ -259,6 +342,7 @@ import QingxinCore
         if day == SchoolDate.key(Date()) { todayList = courses; todayStatus = status; todayUpdated = lastUpdated }
     }
     func exitDemo() {
+        generation += 1
         demo = false; courses = []; selectedDate = Date(); lastUpdated = nil; result = nil
         todayList = []; todayUpdated = nil
         status = session == nil ? "登录后查看今日课程" : "请刷新课表"

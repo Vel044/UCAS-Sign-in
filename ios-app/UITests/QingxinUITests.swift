@@ -53,6 +53,21 @@ final class QingxinUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["讲座预约"].firstMatch.waitForExistence(timeout: 5))
     }
 
+    func testAttendanceHistoryShowsCourseCountsAndLessonRecords() {
+        let app = demoApp()
+        app.tabBars.buttons["课表"].tap()
+        let history = app.buttons["attendanceHistory"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        history.tap()
+        XCTAssertTrue(app.staticTexts["合计已签到 2 次"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["共 3 节 · 已签到 2 次"].exists)
+        app.staticTexts["高等数学"].tap()
+        XCTAssertTrue(app.navigationBars["高等数学"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["全部课次"].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "已签到").count, 2)
+        XCTAssertTrue(app.staticTexts["未开始"].exists)
+    }
+
     func testExitDemoReturnsToLoginAndKeepsSigningUnavailable() {
         let app = demoApp()
         app.tabBars.buttons["设置"].tap()

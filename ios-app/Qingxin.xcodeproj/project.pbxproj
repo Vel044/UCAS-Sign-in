@@ -12,6 +12,7 @@
 		51363A96D95B63A5F1363E7F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E5AF153C6A2D6B2EF1536E41 /* Assets.xcassets */; };
 		515ACCF9433CEDB1B135C4FE /* ReminderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59D9A39A6C3DBDB61ECBD2FF /* ReminderService.swift */; };
 		526DE9AF58768E8DD4E35C55 /* QingxinWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A171B1C465E93E7A0232AC6B /* QingxinWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		559A3833C1D276187E06797F /* AttendanceHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 951A5BFFF39DF07542E97CD3 /* AttendanceHistoryView.swift */; };
 		572733BE997CACA7EC39CAD5 /* SnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 024BEC2F4C4DA72CBE465BCE /* SnapshotStore.swift */; };
 		582AA42E95B890C9D50E591A /* QRView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943BC794A3C4214AE66EFB69 /* QRView.swift */; };
 		5D8683686045A831D637E6D1 /* QingxinApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 850F97553DE4FA0F3291D79D /* QingxinApp.swift */; };
@@ -79,6 +80,7 @@
 		67FEF76F03AC6F393F30CFCB /* QingxinUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = QingxinUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		850F97553DE4FA0F3291D79D /* QingxinApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QingxinApp.swift; sourceTree = "<group>"; };
 		943BC794A3C4214AE66EFB69 /* QRView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRView.swift; sourceTree = "<group>"; };
+		951A5BFFF39DF07542E97CD3 /* AttendanceHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttendanceHistoryView.swift; sourceTree = "<group>"; };
 		972F15624E7E4ED349CC9A44 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		A171B1C465E93E7A0232AC6B /* QingxinWidget.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = QingxinWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACE34541DB5022783DDDF582 /* SecureStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureStore.swift; sourceTree = "<group>"; };
@@ -201,6 +203,7 @@
 			children = (
 				4C93FF58D410B25C4A654C62 /* AppState.swift */,
 				E5AF153C6A2D6B2EF1536E41 /* Assets.xcassets */,
+				951A5BFFF39DF07542E97CD3 /* AttendanceHistoryView.swift */,
 				3B8A3263100717FD2E12B86A /* LectureView.swift */,
 				850F97553DE4FA0F3291D79D /* QingxinApp.swift */,
 				943BC794A3C4214AE66EFB69 /* QRView.swift */,
@@ -385,6 +388,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				DF75E1E98C7A1F27A781691E /* AppState.swift in Sources */,
+				559A3833C1D276187E06797F /* AttendanceHistoryView.swift in Sources */,
 				29ED1C92E4CB372E557753B1 /* LectureView.swift in Sources */,
 				582AA42E95B890C9D50E591A /* QRView.swift in Sources */,
 				5D8683686045A831D637E6D1 /* QingxinApp.swift in Sources */,

@@ -170,6 +170,20 @@ struct ScheduleView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                if state.loggedIn {
+                    NavigationLink {
+                        AttendanceHistoryView().id(state.generation)
+                    } label: {
+                        HStack {
+                            Label("签到记录", systemImage: "checkmark.circle")
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
+                        }
+                        .padding(14)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    .accessibilityIdentifier("attendanceHistory")
+                }
                 HStack {
                     Button { moveDay(-1) } label: { Image(systemName: "chevron.left").padding(10) }
                         .accessibilityLabel("上一天")
